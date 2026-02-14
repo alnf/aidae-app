@@ -127,7 +127,7 @@ library(GetoptLong)
 # 2. the sub-heatmap and the default output
 # 3. the self-defined output
 library(shiny)
-library(shinydashboard)
+library(bs4Dash)
 library(shinymanager)
 
 creds <- read.table("data/creds.txt", sep="\t", header = T)
@@ -143,37 +143,65 @@ credentials <- data.frame(
 
 
 body <- dashboardBody(
-  fluidRow(
-    column(width = 4,
-      box(title = "Differential heatmap", width = NULL, solidHeader = TRUE, status = "primary",
-        originalHeatmapOutput("ht", height = 800, containment = TRUE)
+  tags$style(HTML("
+    .main-header .navbar-nav.ml-auto { display: none !important; }
+    /* Heatmap toolbar: icons are Font Awesome (.fa) inside .nav-tabs */
+    [id$='_heatmap_control'] .nav-tabs .fa,
+    [id$='_heatmap_control'] .nav-tabs .fas,
+    [id$='_heatmap_control'] .nav-tabs .far,
+    [id$='_heatmap_control'] .nav-tabs .fab {
+      font-size: 14px !important;
+      -webkit-font-smoothing: antialiased;
+    }
+    [id$='_heatmap_control'] .nav-tabs > li {
+      margin-left: 16px;
+    }
+    [id$='_heatmap_control'] .nav-tabs > li:first-child {
+      margin-left: 0;
+    }
+  ")),
+  tabItems(
+    tabItem(
+      tabName = "degs",
+      fluidRow(
+        column(width = 4,
+          box(title = "Differential heatmap", width = NULL, solidHeader = TRUE, status = "primary",
+            originalHeatmapOutput("ht", height = 800, containment = TRUE)
+          )
+        ),
+        column(width = 4,
+          id = "column2",
+          box(title = "Sub-heatmap", width = NULL, solidHeader = TRUE, status = "primary",
+            subHeatmapOutput("ht", title = NULL, containment = TRUE)
+          ),
+          box(title = "Result table of the selected genes", width = NULL, solidHeader = TRUE, status = "primary",
+            DTOutput("res_table")
+          )
+        ),
+        column(width = 4,
+          box(title = "MA-plot", width = NULL, solidHeader = TRUE, status = "primary",
+            plotOutput("ma_plot")
+          ),
+          box(title = "Volcano plot", width = NULL, solidHeader = TRUE, status = "primary",
+            plotOutput("volcano_plot")
+          )
+        ),
+        tags$style("
+          .content-wrapper, .right-side {
+            overflow-x: auto;
+          }
+          .content {
+            min-width:1500px;
+          }
+        ")
       )
     ),
-    column(width = 4,
-      id = "column2",
-      box(title = "Sub-heatmap", width = NULL, solidHeader = TRUE, status = "primary",
-        subHeatmapOutput("ht", title = NULL, containment = TRUE)
-      ),
-      box(title = "Result table of the selected genes", width = NULL, solidHeader = TRUE, status = "primary",
-        DTOutput("res_table")
+    tabItem(
+      tabName = "gene",
+      box(title = "Gene", width = 12, solidHeader = TRUE, status = "secondary",
+        p("Gene-level content to be added.")
       )
-    ),
-    column(width = 4,
-      box(title = "MA-plot", width = NULL, solidHeader = TRUE, status = "primary",
-        plotOutput("ma_plot")
-      ),
-      box(title = "Volcano plot", width = NULL, solidHeader = TRUE, status = "primary",
-        plotOutput("volcano_plot")
-      )
-    ),
-    tags$style("
-      .content-wrapper, .right-side {
-        overflow-x: auto;
-      }
-      .content {
-        min-width:1500px;
-      }
-    ")
+    )
   )
 )
 
@@ -181,15 +209,28 @@ body <- dashboardBody(
 # selected must be the choice value (study id), not the label
 default_study <- if (length(study_ids) == 1L) study_ids[1L] else ""
 ui <- secure_app(dashboardPage(
-  dashboardHeader(title = main_config$title),
-  dashboardSidebar(
+  title = main_config$title,
+  fullscreen = FALSE,
+  dark = FALSE,
+  help = FALSE,
+  header = dashboardHeader(
+    title = main_config$title,
+    navbarMenu(
+      id = "navtabs",
+      navbarTab(tabName = "degs", text = "DEGs"),
+      navbarTab(tabName = "gene", text = "Gene")
+    )
+  ),
+  sidebar = dashboardSidebar(
+    minified = FALSE,
     selectInput("study", label = "Study", choices = study_choices, selected = default_study),
     selectInput("fdr", label = "Cutoff for FDRs:", c("0.001" = 0.001, "0.01" = 0.01, "0.05" = 0.05)),
     numericInput("base_mean", label = "Minimal base mean:", value = 0),
     numericInput("log2fc", label = "Minimal abs(log2 fold change):", value = 1),
     actionButton("filter", label = "Generate heatmap")
   ),
-  body
+  controlbar = dashboardControlbar(disable = TRUE),
+  body = body
 ))
 
 # Load study data (res, mm) from data/<study_id>/ using study config.
