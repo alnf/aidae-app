@@ -1,3 +1,6 @@
+# Plots
+*.pdf
+
 # History files
 .Rhistory
 .Rapp.history
@@ -45,5 +48,13 @@ docs/
 # translation temp files
 po/*~
 
-# RStudio Connect folder
+# RStudio Connect
+manifest.json
 rsconnect/
+rsconnect-python/
+
+# Sensitive information
+.cursor/
+data/
+rsconnect.sh
+*.code-workspace
