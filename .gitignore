@@ -58,3 +58,4 @@ rsconnect-python/
 data/
 rsconnect.sh
 *.code-workspace
+config.yaml
