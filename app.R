@@ -45,6 +45,32 @@ for (i in seq_along(study_ids)) {
 study_choices <- setNames(study_ids, study_labels)
 if (length(study_choices) == 0L) study_choices <- c("(no studies)" = "")
 
+# Return list of {label, deg_file} for a study (supports deg_lists or legacy deg_file).
+study_deg_lists <- function(study_id) {
+  if (is.null(study_id) || study_id == "") return(list())
+  cfg_path <- file.path("data", study_id, "config.yaml")
+  if (!file.exists(cfg_path)) return(list())
+  cfg <- yaml::read_yaml(cfg_path)
+  if (!is.null(cfg$deg_lists) && length(cfg$deg_lists) > 0L) {
+    return(cfg$deg_lists)
+  }
+  if (!is.null(cfg$deg_file)) {
+    return(list(list(label = if (!is.null(cfg$name)) cfg$name else study_id, deg_file = cfg$deg_file)))
+  }
+  list()
+}
+
+# Default study = first; default DEG list = first list of first study.
+default_study <- if (length(study_ids) > 0L) study_ids[1L] else ""
+first_study_lists <- study_deg_lists(default_study)
+default_deg_choices <- if (length(first_study_lists) > 0L) {
+  setNames(vapply(first_study_lists, function(x) x$deg_file, character(1L)),
+           vapply(first_study_lists, function(x) x$label, character(1L)))
+} else {
+  c("(no DEG lists)" = "")
+}
+default_deg <- if (length(first_study_lists) > 0L) first_study_lists[[1L]]$deg_file else ""
+
 # Make the heatmap for differentially expressed genes under certain cutoffs.
 # Returns list(ht = ..., row_index = which(l)) or NULL; res and mm must be set.
 make_heatmap <- function(res, mm, fdr = 0.01, base_mean = 0, log2fc = 1) {
@@ -52,7 +78,7 @@ make_heatmap <- function(res, mm, fdr = 0.01, base_mean = 0, log2fc = 1) {
   l <- res$padj <= fdr & res$baseMean >= base_mean & abs(res$log2FoldChange) >= log2fc
   l[is.na(l)] <- FALSE
   if (sum(l) == 0L) return(NULL)
-  m <- mm[l, , drop = FALSE]
+  m <- mm[    l, , drop = FALSE]
   row_index <- which(l)
   ht <- Heatmap(t(scale(t(m))), name = "z-score",
       show_row_names = FALSE, show_column_names = FALSE, row_km = 2,
@@ -205,9 +231,7 @@ body <- dashboardBody(
   )
 )
 
-# Side bar: study selector then cutoffs for significant genes.
-# selected must be the choice value (study id), not the label
-default_study <- if (length(study_ids) == 1L) study_ids[1L] else ""
+# Side bar: study selector, then DEG list, then cutoffs for significant genes.
 ui <- secure_app(dashboardPage(
   title = main_config$title,
   fullscreen = FALSE,
@@ -224,6 +248,7 @@ ui <- secure_app(dashboardPage(
   sidebar = dashboardSidebar(
     minified = FALSE,
     selectInput("study", label = "Study", choices = study_choices, selected = default_study),
+    selectInput("deg_list", label = "DEG list", choices = default_deg_choices, selected = default_deg),
     selectInput("fdr", label = "Cutoff for FDRs:", c("0.001" = 0.001, "0.01" = 0.01, "0.05" = 0.05)),
     numericInput("base_mean", label = "Minimal base mean:", value = 0),
     numericInput("log2fc", label = "Minimal abs(log2 fold change):", value = 1),
@@ -233,13 +258,13 @@ ui <- secure_app(dashboardPage(
   body = body
 ))
 
-# Load study data (res, mm) from data/<study_id>/ using study config.
-load_study_data <- function(study_id) {
-  if (is.null(study_id) || study_id == "") return(list(res = NULL, mm = NULL))
+# Load study data (res, mm) from data/<study_id>/ using study config and selected deg_file.
+load_study_data <- function(study_id, deg_file) {
+  if (is.null(study_id) || study_id == "" || is.null(deg_file) || deg_file == "") return(list(res = NULL, mm = NULL))
   cfg_path <- file.path("data", study_id, "config.yaml")
   if (!file.exists(cfg_path)) return(list(res = NULL, mm = NULL))
   cfg <- yaml::read_yaml(cfg_path)
-  deg_path <- file.path("data", study_id, cfg$deg_file)
+  deg_path <- file.path("data", study_id, deg_file)
   counts_path <- file.path("data", study_id, cfg$counts_file)
   if (!file.exists(deg_path) || !file.exists(counts_path)) return(list(res = NULL, mm = NULL))
   res <- read.table(deg_path, sep = "\t", header = TRUE, check.names = FALSE)
@@ -256,16 +281,32 @@ server <- function(input, output, session) {
 
   rv <- reactiveValues(current_res = NULL, current_mm = NULL, row_index = NULL)
 
-  # Load data when study selection changes
+  # When study changes, update DEG list dropdown to that study's lists (first selected).
   observeEvent(input$study, {
     rv$current_res <- NULL
     rv$current_mm <- NULL
     rv$row_index <- NULL
     if (is.null(input$study) || input$study == "") return()
-    loaded <- load_study_data(input$study)
+    lists <- study_deg_lists(input$study)
+    if (length(lists) == 0L) {
+      updateSelectInput(session, "deg_list", choices = c("(no DEG lists)" = ""), selected = "")
+      return()
+    }
+    choices <- setNames(vapply(lists, function(x) x$deg_file, character(1L)),
+                       vapply(lists, function(x) x$label, character(1L)))
+    updateSelectInput(session, "deg_list", choices = choices, selected = lists[[1L]]$deg_file)
+  }, ignoreNULL = FALSE)
+
+  # Load data when study or DEG list selection changes (runs on init so default study+list load).
+  observeEvent(list(input$study, input$deg_list), {
+    rv$current_res <- NULL
+    rv$current_mm <- NULL
+    rv$row_index <- NULL
+    if (is.null(input$study) || input$study == "" || is.null(input$deg_list) || input$deg_list == "") return()
+    loaded <- load_study_data(input$study, input$deg_list)
     rv$current_res <- loaded$res
     rv$current_mm <- loaded$mm
-  }, ignoreNULL = FALSE)
+  }, ignoreNULL = FALSE, ignoreInit = FALSE)
 
   # Brush action uses current study data from rv
   brush_action <- function(df, input, output, session) {
@@ -285,8 +326,8 @@ server <- function(input, output, session) {
     )
   }
 
-  # Regenerate heatmap when filter is clicked or study changes
-  observeEvent(list(input$filter, input$study), {
+  # Regenerate heatmap when filter is clicked or study/DEG list changes
+  observeEvent(list(input$filter, input$study, input$deg_list), {
     if (is.null(rv$current_res) || is.null(rv$current_mm)) {
       output$ht_heatmap <- renderPlot({
         grid.newpage()
