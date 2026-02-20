@@ -60,6 +60,69 @@ study_deg_lists <- function(study_id) {
   list()
 }
 
+# Return SampleNumber vector for samples in the comparison identified by label (joint in
+# comparison_file), or NULL if no filtering (missing config/files, or no matching row).
+samples_for_comparison <- function(study_id, label) {
+  message("samples_for_comparison entered: study_id=", study_id, " label=", label)
+  if (is.null(study_id) || study_id == "" || is.null(label) || label == "") {
+    message("samples_for_comparison: return NULL (null/empty study_id or label)")
+    return(NULL)
+  }
+  cfg_path <- file.path("data", study_id, "config.yaml")
+  if (!file.exists(cfg_path)) {
+    message("samples_for_comparison: return NULL (config file not found)")
+    return(NULL)
+  }
+  cfg <- yaml::read_yaml(cfg_path)
+  if (is.null(cfg$comparison_file) || is.null(cfg$metadata_file)) {
+    message("samples_for_comparison: return NULL (comparison_file or metadata_file missing in config)")
+    return(NULL)
+  }
+  comp_path <- file.path("data", study_id, cfg$comparison_file)
+  meta_path <- file.path("data", study_id, cfg$metadata_file)
+  if (!file.exists(comp_path) || !file.exists(meta_path)) {
+    message("samples_for_comparison: return NULL (file not found: comp=", file.exists(comp_path), " meta=", file.exists(meta_path), " meta_path=", meta_path, ")")
+    return(NULL)
+  }
+  comp <- read.table(comp_path, sep = "\t", header = TRUE, check.names = FALSE)
+  if (!all(c("joint", "group1", "group2") %in% colnames(comp))) {
+    message("samples_for_comparison: return NULL (comparison file missing joint/group1/group2)")
+    return(NULL)
+  }
+  idx <- which(comp$joint == label)
+  if (length(idx) == 0L) {
+    message("samples_for_comparison: return NULL (no row with joint == label)")
+    return(NULL)
+  }
+  group1 <- comp$group1[idx[1L]]
+  group2 <- comp$group2[idx[1L]]
+  meta <- read.table(meta_path, sep = "\t", header = TRUE, check.names = FALSE)
+  if (!all(c("PhenoNames", "SampleNumber") %in% colnames(meta))) {
+    message("samples_for_comparison: return NULL (metadata missing PhenoNames or SampleNumber)")
+    return(NULL)
+  }
+  keep <- meta$PhenoNames %in% c(group1, group2)
+  # Optional extra filter(s) from this DEG list: metadata_filter is column -> value(s).
+  deg_entry <- if (!is.null(cfg$deg_lists) && length(cfg$deg_lists) > 0L) {
+    idx <- match(label, vapply(cfg$deg_lists, function(x) x$label, character(1L)))
+    if (!is.na(idx)) cfg$deg_lists[[idx]] else NULL
+  } else if (!is.null(cfg$deg_file) && (if (!is.null(cfg$name)) cfg$name else study_id) == label) {
+    list(metadata_filter = NULL)
+  } else NULL
+  mf <- if (!is.null(deg_entry) && !is.null(deg_entry$metadata_filter)) deg_entry$metadata_filter else NULL
+  if (!is.null(mf) && is.list(mf) && length(mf) > 0L) {
+    for (col in names(mf)) {
+      if (col %in% colnames(meta)) {
+        vals <- as.character(unlist(mf[[col]]))
+        keep <- keep & (meta[[col]] %in% vals)
+      }
+    }
+  }
+  out <- meta$SampleNumber[keep]
+  message("Samples for heatmap (SampleNumber): ", paste(out, collapse = ", "))
+  out
+}
+
 # Default study = first; default DEG list = first list of first study.
 default_study <- if (length(study_ids) > 0L) study_ids[1L] else ""
 first_study_lists <- study_deg_lists(default_study)
@@ -73,20 +136,33 @@ default_deg <- if (length(first_study_lists) > 0L) first_study_lists[[1L]]$deg_f
 
 # Make the heatmap for differentially expressed genes under certain cutoffs.
 # Returns list(ht = ..., row_index = which(l)) or NULL; res and mm must be set.
-make_heatmap <- function(res, mm, fdr = 0.01, base_mean = 0, log2fc = 1) {
+make_heatmap <- function(res, mm, fdr = 0.01, base_mean = 0, log2fc = 1, svalue = 0.005) {
   if (is.null(res) || is.null(mm) || nrow(res) == 0L) return(NULL)
+  mm <- mm[res$ens_gene, , drop = FALSE]
   l <- res$padj <= fdr & res$baseMean >= base_mean & abs(res$log2FoldChange) >= log2fc
+  if ("svalue" %in% colnames(res)) l <- l & res$svalue <= svalue
   l[is.na(l)] <- FALSE
   if (sum(l) == 0L) return(NULL)
   m <- mm[    l, , drop = FALSE]
   row_index <- which(l)
-  ht <- Heatmap(t(scale(t(m))), name = "z-score",
-      show_row_names = FALSE, show_column_names = FALSE, row_km = 2,
-      column_title = paste0(sum(l), " significant genes with FDR < ", fdr),
-      show_row_dend = FALSE) +
-      Heatmap(log10(res$baseMean[l] + 1), show_row_names = FALSE, width = unit(5, "mm"),
+  # Z-score by row; drop rows with any NA/NaN/Inf (e.g. constant rows) so kmeans gets valid data
+  m_z <- t(scale(t(m)))
+  keep_row <- rowSums(!is.finite(m_z)) == 0L
+  m_z <- m_z[keep_row, , drop = FALSE]
+  row_index <- row_index[keep_row]
+  if (nrow(m_z) == 0L) return(NULL)
+  n_row <- nrow(m_z)
+  n_col <- ncol(m_z)
+  message("Heatmap dimensions: n_row=", n_row, " n_col=", n_col)
+  # row_km can fail with few rows/columns (e.g. kmeans); only cluster when enough data
+  row_km_arg <- if (n_row >= 3L && n_col >= 2L) 2L else NULL
+  ht <- Heatmap(m_z, name = "z-score",
+      show_row_names = FALSE, show_column_names = FALSE,
+      row_km = row_km_arg, show_row_dend = !is.null(row_km_arg),
+      column_title = paste0(n_row, " significant genes with FDR < ", fdr)) +
+      Heatmap(log10(res$baseMean[row_index] + 1), show_row_names = FALSE, width = unit(5, "mm"),
           name = "log10(baseMean+1)", show_column_names = FALSE) +
-      Heatmap(res$log2FoldChange[l], show_row_names = FALSE, width = unit(5, "mm"),
+      Heatmap(res$log2FoldChange[row_index], show_row_names = FALSE, width = unit(5, "mm"),
           name = "log2FoldChange", show_column_names = FALSE,
           col = colorRamp2(c(-2, 0, 2), c("green", "white", "red")))
   pdf(NULL)
@@ -185,6 +261,11 @@ body <- dashboardBody(
     [id$='_heatmap_control'] .nav-tabs > li:first-child {
       margin-left: 0;
     }
+    /* Align sidebar description with other inputs: remove indent from shiny-html-output */
+    .main-sidebar .shiny-html-output {
+      padding-left: 0;
+      margin-left: 0;
+    }
   ")),
   tabItems(
     tabItem(
@@ -249,8 +330,10 @@ ui <- secure_app(dashboardPage(
     minified = FALSE,
     selectInput("study", label = "Study", choices = study_choices, selected = default_study),
     selectInput("deg_list", label = "DEG list", choices = default_deg_choices, selected = default_deg),
-    selectInput("fdr", label = "Cutoff for FDRs:", c("0.001" = 0.001, "0.01" = 0.01, "0.05" = 0.05)),
-    numericInput("base_mean", label = "Minimal base mean:", value = 0),
+    uiOutput("deg_description"),
+    selectInput("fdr", label = "Cutoff for FDRs:", c("0.001" = 0.001, "0.01" = 0.01, "0.05" = 0.05), selected = 0.05),
+    numericInput("svalue", label = "Cutoff for svalue:", value = 0.005),
+    numericInput("base_mean", label = "Minimal base mean:", value = 20),
     numericInput("log2fc", label = "Minimal abs(log2 fold change):", value = 1),
     actionButton("filter", label = "Generate heatmap")
   ),
@@ -269,6 +352,17 @@ load_study_data <- function(study_id, deg_file) {
   if (!file.exists(deg_path) || !file.exists(counts_path)) return(list(res = NULL, mm = NULL))
   res <- read.table(deg_path, sep = "\t", header = TRUE, check.names = FALSE)
   mm <- read.table(counts_path, sep = "\t", header = TRUE, row.names = 1, check.names = FALSE)
+  # Resolve label for selected DEG list and optionally filter mm to comparison samples.
+  lists <- if (!is.null(cfg$deg_lists) && length(cfg$deg_lists) > 0L) cfg$deg_lists else
+    if (!is.null(cfg$deg_file)) list(list(label = if (!is.null(cfg$name)) cfg$name else study_id, deg_file = cfg$deg_file)) else list()
+  idx <- match(deg_file, vapply(lists, function(x) x$deg_file, character(1L)))
+  label <- if (!is.na(idx) && !is.null(lists[[idx]]$label)) lists[[idx]]$label else NULL
+  print("TEST")
+  sample_names <- if (!is.null(label)) samples_for_comparison(study_id, label) else NULL
+  if (length(sample_names) > 0L) {
+    keep <- intersect(sample_names, colnames(mm))
+    if (length(keep) > 0L) mm <- mm[, keep, drop = FALSE]
+  }
   required <- c("padj", "baseMean", "log2FoldChange", "symbol")
   if (!all(required %in% colnames(res)) || nrow(res) != nrow(mm)) return(list(res = NULL, mm = NULL))
   list(res = res, mm = mm)
@@ -296,6 +390,20 @@ server <- function(input, output, session) {
                        vapply(lists, function(x) x$label, character(1L)))
     updateSelectInput(session, "deg_list", choices = choices, selected = lists[[1L]]$deg_file)
   }, ignoreNULL = FALSE)
+
+  # Description for the selected DEG list (from config)
+  output$deg_description <- renderUI({
+    if (is.null(input$study) || input$study == "" || is.null(input$deg_list) || input$deg_list == "") return(NULL)
+    lists <- study_deg_lists(input$study)
+    idx <- match(input$deg_list, vapply(lists, function(x) x$deg_file, character(1L)))
+    desc <- if (!is.na(idx) && !is.null(lists[[idx]]$description)) lists[[idx]]$description else ""
+    if (desc == "") return(NULL)
+    tags$div(
+      class = "form-group shiny-input-container",
+      tags$label("Description", class = "control-label"),
+      tags$div(desc, class = "text-muted", style = "margin-top: 0.25rem; font-size: 0.9rem;")
+    )
+  })
 
   # Load data when study or DEG list selection changes (runs on init so default study+list load).
   observeEvent(list(input$study, input$deg_list), {
@@ -336,7 +444,7 @@ server <- function(input, output, session) {
       return()
     }
     out <- make_heatmap(rv$current_res, rv$current_mm,
-      fdr = as.numeric(input$fdr), base_mean = input$base_mean, log2fc = input$log2fc)
+      fdr = as.numeric(input$fdr), base_mean = input$base_mean, log2fc = input$log2fc, svalue = input$svalue)
     if (!is.null(out)) {
       rv$row_index <- out$row_index
       makeInteractiveComplexHeatmap(input, output, session, out$ht, "ht",
