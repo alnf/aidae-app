@@ -189,3 +189,37 @@ load_study_data <- function(study_id, deg_file) {
   out
 }
 
+# Merge thresholds from data/<study_id>/config.yaml into defaults from make_heatmap().
+# 1) Study-level cfg$thresholds (fdr, base_mean, log2fc, svalue — all optional) applies to every DEG list.
+# 2) If deg_lists[].thresholds exists for the selected list, it overrides those keys only.
+# Legacy: single top-level deg_file without deg_lists uses cfg$thresholds only.
+deg_list_threshold_defaults <- function(study_id, deg_file) {
+  d <- default_heatmap_thresholds()
+  if (is.null(study_id) || study_id == "" || is.null(deg_file) || deg_file == "") return(d)
+  cfg_path <- file.path("data", study_id, "config.yaml")
+  if (!file.exists(cfg_path)) return(d)
+  cfg <- yaml::read_yaml(cfg_path)
+
+  merge_thr <- function(d, thr) {
+    if (is.null(thr) || !is.list(thr)) return(d)
+    if (!is.null(thr$fdr)) d$fdr <- as.numeric(thr$fdr)
+    if (!is.null(thr$base_mean)) d$base_mean <- as.numeric(thr$base_mean)
+    if (!is.null(thr$log2fc)) d$log2fc <- as.numeric(thr$log2fc)
+    if (!is.null(thr$svalue)) d$svalue <- as.numeric(thr$svalue)
+    d
+  }
+
+  if (!is.null(cfg$thresholds) && is.list(cfg$thresholds)) {
+    d <- merge_thr(d, cfg$thresholds)
+  }
+
+  if (!is.null(cfg$deg_lists) && length(cfg$deg_lists) > 0L) {
+    idx <- match(deg_file, vapply(cfg$deg_lists, function(x) x$deg_file, character(1L)))
+    if (!is.na(idx) && is.list(cfg$deg_lists[[idx]]) && !is.null(cfg$deg_lists[[idx]]$thresholds)) {
+      d <- merge_thr(d, cfg$deg_lists[[idx]]$thresholds)
+    }
+  }
+
+  d
+}
+

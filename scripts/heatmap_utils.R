@@ -3,8 +3,13 @@ pheno_colors <- function(levels) {
   setNames(palette[seq_along(levels) %% length(palette) + 1L], levels)
 }
 
-make_heatmap <- function(res, mm, fdr = 0.01, base_mean = 0, log2fc = 1, svalue = 0.005, col_annot = NULL,
-                         show_row_names = FALSE) {
+# Defaults match make_heatmap() formal arguments (used when study config has no thresholds).
+default_heatmap_thresholds <- function() {
+  list(fdr = 0.05, base_mean = 0, log2fc = 1, svalue = 0.005)
+}
+
+# Row indices into `res` for genes that pass numeric thresholds and finite z-scores (same rules as make_heatmap).
+filter_heatmap_row_index <- function(res, mm, fdr, base_mean, log2fc, svalue) {
   if (is.null(res) || is.null(mm) || nrow(res) == 0L) return(NULL)
   mm <- mm[res$ens_gene, , drop = FALSE]
   l <- res$padj <= fdr & abs(res$log2FoldChange) >= log2fc
@@ -16,8 +21,19 @@ make_heatmap <- function(res, mm, fdr = 0.01, base_mean = 0, log2fc = 1, svalue 
   row_index <- which(l)
   m_z <- t(scale(t(m)))
   keep_row <- rowSums(!is.finite(m_z)) == 0L
-  m_z <- m_z[keep_row, , drop = FALSE]
   row_index <- row_index[keep_row]
+  if (length(row_index) == 0L) return(NULL)
+  row_index
+}
+
+make_heatmap <- function(res, mm, fdr = 0.05, base_mean = 0, log2fc = 1, svalue = 0.005, col_annot = NULL,
+                         show_row_names = FALSE) {
+  if (is.null(res) || is.null(mm) || nrow(res) == 0L) return(NULL)
+  row_index <- filter_heatmap_row_index(res, mm, fdr, base_mean, log2fc, svalue)
+  if (is.null(row_index)) return(NULL)
+  mm <- mm[res$ens_gene, , drop = FALSE]
+  m <- mm[row_index, , drop = FALSE]
+  m_z <- t(scale(t(m)))
   if (nrow(m_z) == 0L) return(NULL)
   # Prepare row labels (symbols) without touching matrix rownames
   row_lab <- NULL

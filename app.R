@@ -10,9 +10,12 @@ library(ComplexHeatmap)
 library(circlize)
 library(yaml)
 
-source("scripts/study_data.R")
 source("scripts/heatmap_utils.R")
+source("scripts/study_data.R")
 source("scripts/perf_utils.R")
+
+# UI defaults align with make_heatmap() / default_heatmap_thresholds(); study+DEG list can override via config.
+default_thr <- default_heatmap_thresholds()
 
 # Main app config (title, studies list; fallback if file missing)
 main_config_path <- "config.yaml"
@@ -88,6 +91,26 @@ credentials <- data.frame(
 
 
 body <- dashboardBody(
+  tags$head(
+    tags$script(HTML("
+      Shiny.addCustomMessageHandler('exprs_copy_text', function(text) {
+        if (text === null || text === undefined) return;
+        var s = String(text);
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(s).catch(function(e) { console.error(e); });
+        } else {
+          var ta = document.createElement('textarea');
+          ta.value = s;
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          try { document.execCommand('copy'); } catch (err) { console.error(err); }
+          document.body.removeChild(ta);
+        }
+      });
+    "))
+  ),
   tags$style(HTML("
     .main-header .navbar-nav.ml-auto { display: none !important; }
     /* Heatmap toolbar: icons are Font Awesome (.fa) inside .nav-tabs */
@@ -120,7 +143,10 @@ body <- dashboardBody(
           )
         ),
         column(width = 4,
-          box(title = uiOutput("res_table_title"), width = NULL, solidHeader = TRUE, status = "primary",
+          box(
+            title = uiOutput("res_table_title"),
+            width = NULL, solidHeader = TRUE, status = "primary",
+            actionButton("copy_table_symbols", label = "Copy gene symbols", class = "btn-sm btn-outline-secondary mb-2"),
             DTOutput("res_table")
           )
         ),
@@ -174,10 +200,10 @@ ui <- secure_app(dashboardPage(
     selectInput("study", label = "Study", choices = study_choices, selected = default_study),
     selectInput("deg_list", label = "DEG list", choices = default_deg_choices, selected = default_deg),
     uiOutput("deg_description"),
-    selectInput("fdr", label = "Cutoff for FDRs:", c("0.001" = 0.001, "0.01" = 0.01, "0.05" = 0.05, "0.1" = 0.1), selected = 0.05),
+    selectInput("fdr", label = "Cutoff for FDRs:", c("0.001" = 0.001, "0.01" = 0.01, "0.05" = 0.05, "0.1" = 0.1), selected = default_thr$fdr),
     uiOutput("svalue_ui"),
     uiOutput("base_mean_ui"),
-    numericInput("log2fc", label = "Minimal abs(log2 fold change):", value = 1),
+    numericInput("log2fc", label = "Minimal abs(log2 fold change):", value = default_thr$log2fc),
     checkboxInput("show_rownames", label = "Show row names on heatmap", value = FALSE),
     actionButton("filter", label = "Generate heatmap"),
     br(),
@@ -201,15 +227,16 @@ server <- function(input, output, session) {
     row_index = NULL,
     selected_rows = NULL,
     custom_genes = NULL,
-    custom_genes_study = NULL
+    custom_genes_study = NULL,
+    threshold_defaults = default_heatmap_thresholds()
   )
 
-  # Dynamic title for result table: all genes by default, selected genes after sub-heatmap selection
+  # Dynamic title for result table: threshold-filtered genes, or sub-heatmap selection
   output$res_table_title <- renderText({
     if (!is.null(rv$selected_rows) && length(rv$selected_rows) > 0) {
       "Result table of the selected genes"
     } else {
-      "Result table of all genes"
+      "Result table of genes passing current thresholds"
     }
   })
 
@@ -242,8 +269,8 @@ server <- function(input, output, session) {
 
     if (isTRUE(apply_thresholds)) {
       # Apply numeric thresholds within the selected genes only
-      sval <- if ("svalue" %in% colnames(res_sub)) as.numeric(if (!is.null(input$svalue)) input$svalue else 0.005) else 0.005
-      bmean <- if ("baseMean" %in% colnames(res_sub)) as.numeric(if (!is.null(input$base_mean)) input$base_mean else 20) else 0
+      sval <- if ("svalue" %in% colnames(res_sub)) as.numeric(if (!is.null(input$svalue)) input$svalue else default_heatmap_thresholds()$svalue) else default_heatmap_thresholds()$svalue
+      bmean <- if ("baseMean" %in% colnames(res_sub)) as.numeric(if (!is.null(input$base_mean)) input$base_mean else default_heatmap_thresholds()$base_mean) else 0
       message(
         "[perf] make_heatmap (custom gene list, with thresholds): start; study=", input$study,
         " deg_list=", input$deg_list,
@@ -306,7 +333,6 @@ server <- function(input, output, session) {
     selected_idx_full <- which(sel)
     rv$row_index <- selected_idx_full[out$row_index]
     rv$selected_rows <- NULL
-    render_res_table(rv$row_index)
     message("[perf] makeInteractiveComplexHeatmap (custom gene list): start; study=", input$study, " deg_list=", input$deg_list)
     perf_time(
       "makeInteractiveComplexHeatmap_custom_genes",
@@ -338,14 +364,14 @@ server <- function(input, output, session) {
     )
   })
 
-  # Helper to render result table for either all or a subset of genes
-  render_res_table <- function(selected_idx = NULL) {
+  # Result table: selected genes from brush, else genes passing current thresholds (and custom list when active)
+  render_res_table <- function(selected_idx) {
     res <- rv$current_res
     if (is.null(res)) return()
     tbl_cols <- c("symbol", "baseMean", "log2FoldChange", "padj")
     tbl_cols <- intersect(tbl_cols, colnames(res))
     num_idx <- which(tbl_cols %in% c("baseMean", "log2FoldChange", "padj"))
-    rows <- if (!is.null(selected_idx)) selected_idx else seq_len(nrow(res))
+    rows <- if (length(selected_idx) == 0L) integer(0) else selected_idx
     output[["res_table"]] <- renderDT(
       formatRound(
         datatable(
@@ -362,17 +388,66 @@ server <- function(input, output, session) {
     )
   }
 
-  # Keep result table in sync with the full heatmap when there is no sub-heatmap selection
-  observe({
-    if (!is.null(rv$current_res) &&
-        !is.null(rv$row_index) &&
-        length(rv$row_index) > 0 &&
-        (is.null(rv$selected_rows) || length(rv$selected_rows) == 0)) {
-      render_res_table(rv$row_index)
+  # Same row set as the result table (brush selection or threshold-filtered rows)
+  current_res_table_row_indices <- function() {
+    res <- rv$current_res
+    mm <- rv$current_mm
+    if (is.null(res) || is.null(mm)) return(NULL)
+    if (!is.null(rv$selected_rows) && length(rv$selected_rows) > 0) {
+      return(rv$selected_rows)
     }
+    sval <- if ("svalue" %in% colnames(res)) as.numeric(if (!is.null(input$svalue)) input$svalue else default_heatmap_thresholds()$svalue) else default_heatmap_thresholds()$svalue
+    bmean <- if ("baseMean" %in% colnames(res)) as.numeric(if (!is.null(input$base_mean)) input$base_mean else default_heatmap_thresholds()$base_mean) else 0
+    fdr <- as.numeric(input$fdr)
+    log2fc <- input$log2fc
+    use_custom <- !is.null(rv$custom_genes) &&
+      length(rv$custom_genes) > 0 &&
+      (isTRUE(input$lock_gene_list) ||
+        (!is.null(rv$custom_genes_study) && identical(input$study, rv$custom_genes_study)))
+    if (use_custom) {
+      genes_vec <- unique(trimws(rv$custom_genes))
+      genes_vec <- genes_vec[nzchar(genes_vec)]
+      if (length(genes_vec) == 0L) return(integer(0))
+      sel <- tolower(res$symbol) %in% tolower(genes_vec)
+      if (!any(sel)) return(integer(0))
+      res_sub <- res[sel, , drop = FALSE]
+      mm_sub <- mm[res_sub$ens_gene, , drop = FALSE]
+      idx_sub <- filter_heatmap_row_index(res_sub, mm_sub, fdr, bmean, log2fc, sval)
+      if (is.null(idx_sub) || length(idx_sub) == 0L) return(integer(0))
+      return(which(sel)[idx_sub])
+    }
+    idx <- filter_heatmap_row_index(res, mm, fdr, bmean, log2fc, sval)
+    if (is.null(idx) || length(idx) == 0L) integer(0) else idx
+  }
+
+  observe({
+    idx <- current_res_table_row_indices()
+    if (is.null(idx)) return()
+    render_res_table(idx)
   })
 
-  # Apply custom gene list (case-insensitive match on symbol; ignore numeric thresholds)
+  observeEvent(input$copy_table_symbols, {
+    idx <- current_res_table_row_indices()
+    res <- rv$current_res
+    if (is.null(idx) || is.null(res) || !("symbol" %in% colnames(res))) {
+      showNotification("No genes to copy.", type = "warning")
+      return()
+    }
+    if (length(idx) == 0L) {
+      showNotification("No genes to copy.", type = "warning")
+      return()
+    }
+    syms <- as.character(res$symbol[idx])
+    syms <- syms[!is.na(syms) & nzchar(syms)]
+    if (length(syms) == 0L) {
+      showNotification("No gene symbols to copy.", type = "warning")
+      return()
+    }
+    session$sendCustomMessage("exprs_copy_text", paste(syms, collapse = "\n"))
+    showNotification(paste(length(syms), "gene symbol(s) copied to clipboard."), type = "message")
+  })
+
+  # Apply custom gene list (case-insensitive match on symbol; heatmap updates on Generate heatmap)
   observeEvent(input$apply_gene_list, {
     isolate({
       genes_raw <- input$gene_list_input
@@ -383,17 +458,29 @@ server <- function(input, output, session) {
       if (length(genes_vec) == 0) return()
       rv$custom_genes <- genes_vec
       rv$custom_genes_study <- input$study
-      # First display: show all selected genes, without thresholds
-      apply_custom_gene_list(apply_thresholds = FALSE)
+      rv$row_index <- NULL
+      rv$selected_rows <- NULL
+      if (is.null(rv$current_res) || is.null(rv$current_mm)) {
+        output$ht_heatmap <- renderPlot({
+          grid.newpage()
+          grid.text("Select a study and load data.")
+        })
+      } else {
+        output$ht_heatmap <- renderPlot({
+          grid.newpage()
+          grid.text("Gene list saved. Click \"Generate heatmap\" to display the heatmap.")
+        })
+      }
+      showNotification("Gene list saved. Click \"Generate heatmap\" to update the view.", type = "message")
     })
   })
 
-  # Clear current custom gene list and revert to threshold-based heatmap for the current study/DEG list
+  # Clear current custom gene list; heatmap updates on Generate heatmap
   observeEvent(input$clear_genes_btn, {
     rv$custom_genes <- NULL
     rv$custom_genes_study <- NULL
     rv$selected_rows <- NULL
-    # Regenerate heatmap using current numeric thresholds
+    rv$row_index <- NULL
     if (is.null(rv$current_res) || is.null(rv$current_mm)) {
       output$ht_heatmap <- renderPlot({
         grid.newpage()
@@ -401,48 +488,10 @@ server <- function(input, output, session) {
       })
       return()
     }
-    # Trigger the same logic as in the main heatmap regeneration observer
-    sval <- if ("svalue" %in% colnames(rv$current_res)) as.numeric(if (!is.null(input$svalue)) input$svalue else 0.005) else 0.005
-    bmean <- if ("baseMean" %in% colnames(rv$current_res)) as.numeric(if (!is.null(input$base_mean)) input$base_mean else 20) else 0
-    message(
-      "[perf] make_heatmap (after clear genes): start; study=", input$study,
-      " deg_list=", input$deg_list,
-      " fdr=", input$fdr,
-      " base_mean=", bmean,
-      " log2fc=", input$log2fc,
-      " svalue=", sval
-    )
-    out <- perf_time(
-      "make_heatmap_after_clear_genes",
-      make_heatmap(
-        rv$current_res, rv$current_mm,
-        fdr = as.numeric(input$fdr), base_mean = bmean, log2fc = input$log2fc, svalue = sval,
-        col_annot = rv$current_col_annot,
-        show_row_names = isTRUE(input$show_rownames)
-      )
-    )
-    if (!is.null(out)) {
-      rv$row_index <- out$row_index
-      # By default, show all genes (within the filtered/heatmap subset) in the result table
-      if (!is.null(rv$row_index)) {
-        render_res_table(rv$row_index)
-      } else {
-        render_res_table(NULL)
-      }
-      message("[perf] makeInteractiveComplexHeatmap (after clear genes): start; study=", input$study, " deg_list=", input$deg_list)
-      perf_time(
-        "makeInteractiveComplexHeatmap_after_clear_genes",
-        makeInteractiveComplexHeatmap(
-          input, output, session, out$ht, "ht",
-          brush_action = brush_action
-        )
-      )
-    } else {
-      output$ht_heatmap <- renderPlot({
-        grid.newpage()
-        grid.text("No row exists after filtering.")
-      })
-    }
+    output$ht_heatmap <- renderPlot({
+      grid.newpage()
+      grid.text("Custom gene list cleared. Click \"Generate heatmap\" to update the view.")
+    })
   })
 
   # When study changes, update DEG list dropdown to that study's lists (first selected).
@@ -466,14 +515,18 @@ server <- function(input, output, session) {
   output$svalue_ui <- renderUI({
     res <- rv$current_res
     if (is.null(res) || !("svalue" %in% colnames(res))) return(NULL)
-    numericInput("svalue", label = "Cutoff for svalue:", value = 0.005)
+    d <- rv$threshold_defaults
+    val <- if (!is.null(d$svalue)) d$svalue else default_heatmap_thresholds()$svalue
+    numericInput("svalue", label = "Cutoff for svalue:", value = val)
   })
 
   # Show base mean cutoff only when the loaded DEG table has a baseMean column
   output$base_mean_ui <- renderUI({
     res <- rv$current_res
     if (is.null(res) || !("baseMean" %in% colnames(res))) return(NULL)
-    numericInput("base_mean", label = "Minimal base mean:", value = 20)
+    d <- rv$threshold_defaults
+    val <- if (!is.null(d$base_mean)) d$base_mean else default_heatmap_thresholds()$base_mean
+    numericInput("base_mean", label = "Minimal base mean:", value = val)
   })
 
   # Description for the selected DEG list (from config)
@@ -503,6 +556,24 @@ server <- function(input, output, session) {
     rv$current_res <- loaded$res
     rv$current_mm <- loaded$mm
     rv$current_col_annot <- loaded$col_annot
+    d <- deg_list_threshold_defaults(input$study, input$deg_list)
+    rv$threshold_defaults <- d
+    fdr_choices <- c(0.001, 0.01, 0.05, 0.1)
+    fdr_sel <- d$fdr
+    if (!fdr_sel %in% fdr_choices) {
+      message(
+        "[config] fdr=", fdr_sel, " not in UI choices ",
+        paste(fdr_choices, collapse = ", "),
+        "; using ", default_heatmap_thresholds()$fdr
+      )
+      fdr_sel <- default_heatmap_thresholds()$fdr
+    }
+    updateSelectInput(session, "fdr", selected = fdr_sel)
+    updateNumericInput(session, "log2fc", value = d$log2fc)
+    output$ht_heatmap <- renderPlot({
+      grid.newpage()
+      grid.text("Click \"Generate heatmap\" to display the heatmap.")
+    })
   }, ignoreNULL = FALSE, ignoreInit = FALSE)
 
   # Brush action uses current study data from rv
@@ -519,11 +590,10 @@ server <- function(input, output, session) {
     output[["volcano_plot"]] <- renderPlot({
       make_volcano(res, selected)
     })
-    render_res_table(selected)
   }
 
-  # Regenerate heatmap when filter is clicked or study/DEG list changes
-  observeEvent(list(input$filter, input$study, input$deg_list), {
+  # Regenerate heatmap only when Generate heatmap is clicked
+  observeEvent(input$filter, {
     perf_time(
       "regenerate_heatmap_observer",
       {
@@ -544,8 +614,8 @@ server <- function(input, output, session) {
             })
             return()
           }
-          sval <- if ("svalue" %in% colnames(rv$current_res)) as.numeric(if (!is.null(input$svalue)) input$svalue else 0.005) else 0.005
-          bmean <- if ("baseMean" %in% colnames(rv$current_res)) as.numeric(if (!is.null(input$base_mean)) input$base_mean else 20) else 0
+          sval <- if ("svalue" %in% colnames(rv$current_res)) as.numeric(if (!is.null(input$svalue)) input$svalue else default_heatmap_thresholds()$svalue) else default_heatmap_thresholds()$svalue
+          bmean <- if ("baseMean" %in% colnames(rv$current_res)) as.numeric(if (!is.null(input$base_mean)) input$base_mean else default_heatmap_thresholds()$base_mean) else 0
           message(
             "[perf] make_heatmap: start; study=", input$study,
             " deg_list=", input$deg_list,
@@ -566,12 +636,6 @@ server <- function(input, output, session) {
           if (!is.null(out)) {
             rv$row_index <- out$row_index
             rv$selected_rows <- NULL
-            # By default, show all genes (within the filtered/heatmap subset) in the result table
-            if (!is.null(rv$row_index)) {
-              render_res_table(rv$row_index)
-            } else {
-              render_res_table(NULL)
-            }
             message("[perf] makeInteractiveComplexHeatmap: start; study=", input$study, " deg_list=", input$deg_list)
             perf_time(
               "makeInteractiveComplexHeatmap",
@@ -589,7 +653,7 @@ server <- function(input, output, session) {
         }
       }
     )
-  }, ignoreNULL = FALSE)
+  }, ignoreNULL = FALSE, ignoreInit = TRUE)
 }
 
 shinyApp(ui, server)
