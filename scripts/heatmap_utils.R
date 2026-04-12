@@ -3,7 +3,8 @@ pheno_colors <- function(levels) {
   setNames(palette[seq_along(levels) %% length(palette) + 1L], levels)
 }
 
-make_heatmap <- function(res, mm, fdr = 0.01, base_mean = 0, log2fc = 1, svalue = 0.005, col_annot = NULL) {
+make_heatmap <- function(res, mm, fdr = 0.01, base_mean = 0, log2fc = 1, svalue = 0.005, col_annot = NULL,
+                         show_row_names = FALSE) {
   if (is.null(res) || is.null(mm) || nrow(res) == 0L) return(NULL)
   mm <- mm[res$ens_gene, , drop = FALSE]
   l <- res$padj <= fdr & abs(res$log2FoldChange) >= log2fc
@@ -18,6 +19,12 @@ make_heatmap <- function(res, mm, fdr = 0.01, base_mean = 0, log2fc = 1, svalue 
   m_z <- m_z[keep_row, , drop = FALSE]
   row_index <- row_index[keep_row]
   if (nrow(m_z) == 0L) return(NULL)
+  # Prepare row labels (symbols) without touching matrix rownames
+  row_lab <- NULL
+  if ("symbol" %in% colnames(res)) {
+    row_lab <- res$symbol[row_index]
+    print(row_lab)
+  }
   n_row <- nrow(m_z)
   n_col <- ncol(m_z)
   message("Heatmap dimensions: n_row=", n_row, " n_col=", n_col)
@@ -30,7 +37,9 @@ make_heatmap <- function(res, mm, fdr = 0.01, base_mean = 0, log2fc = 1, svalue 
   row_km_arg <- if (n_row >= 3L && n_col >= 2L) 2L else NULL
   ht <- Heatmap(
     m_z, name = "z-score",
-    show_row_names = FALSE, show_column_names = FALSE,
+    show_row_names = show_row_names, show_column_names = FALSE,
+    row_names_side = "left",
+    row_labels = row_lab,
     row_km = row_km_arg, show_row_dend = !is.null(row_km_arg),
     column_title = paste0(n_row, " significant genes with FDR < ", fdr),
     top_annotation = top_anno,
@@ -42,12 +51,14 @@ make_heatmap <- function(res, mm, fdr = 0.01, base_mean = 0, log2fc = 1, svalue 
   if ("baseMean" %in% colnames(res)) {
     ht <- ht + Heatmap(
       log10(res$baseMean[row_index] + 1), show_row_names = FALSE, width = unit(5, "mm"),
-      name = "log10(baseMean+1)", show_column_names = FALSE
+      name = "log10(baseMean+1)", show_column_names = FALSE,
+      use_raster = TRUE
     )
   }
   ht <- ht + Heatmap(
     res$log2FoldChange[row_index], show_row_names = FALSE, width = unit(5, "mm"),
     name = "log2FoldChange", show_column_names = FALSE,
+    use_raster = TRUE,
     col = colorRamp2(c(-2, 0, 2), c("green", "white", "red"))
   )
   pdf(NULL)

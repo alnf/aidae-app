@@ -114,6 +114,10 @@ load_study_data <- function(study_id, deg_file) {
     sprintf("load_study_data[%s|%s]: read_deg", study_id, deg_file),
     read.table(deg_path, sep = "\t", header = TRUE, check.names = FALSE)
   )
+  message(
+    "load_study_data: raw nrow(res) = ", nrow(res),
+    " (study=", study_id, ", deg_file=", deg_file, ")"
+  )
   mm <- perf_time(
     sprintf("load_study_data[%s|%s]: read_counts", study_id, deg_file),
     {
@@ -150,6 +154,10 @@ load_study_data <- function(study_id, deg_file) {
   keep <- res$ens_gene %in% rownames(mm)
   res <- res[keep, , drop = FALSE]
   mm <- mm[res$ens_gene, , drop = FALSE]
+  message(
+    "load_study_data: filtered nrow(res) = ", nrow(res),
+    " (kept ", sum(keep), " / ", length(keep), " rows)"
+  )
 
   col_annot <- NULL
   if (!is.null(cfg$metadata_file)) {
