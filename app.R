@@ -72,13 +72,12 @@ default_deg_choices <- if (length(first_study_lists) > 0L) {
 default_deg <- if (length(first_study_lists) > 0L) first_study_lists[[1L]]$deg_file else ""
 
 pathway_txt_files <- list_pathway_txt_files()
+# Default = first pathway so ORA tab reads per-study RDS (config key `ora_file`) without an extra click.
+ora_pathway_default <- if (length(pathway_txt_files) > 0L) pathway_txt_files[[1L]] else ""
 ora_file_choices <- if (length(pathway_txt_files) > 0L) {
-  c(
-    `Select pathway database…` = "",
-    stats::setNames(
-      pathway_txt_files,
-      gsub("_", " ", tools::file_path_sans_ext(pathway_txt_files), fixed = TRUE)
-    )
+  stats::setNames(
+    pathway_txt_files,
+    gsub("_", " ", tools::file_path_sans_ext(pathway_txt_files), fixed = TRUE)
   )
 } else {
   c("(no pathway files in databases/pathways)" = "")
@@ -221,7 +220,7 @@ body <- dashboardBody(
       box(
         title = "Overrepresentation analysis (ORA)",
         width = 12, solidHeader = TRUE, status = "secondary",
-        oraTabUI("ora", study_ids, stats::setNames(study_labels, study_ids), ora_file_choices)
+        oraTabUI("ora", study_ids, stats::setNames(study_labels, study_ids), ora_file_choices, ora_pathway_default)
       )
     )
   )

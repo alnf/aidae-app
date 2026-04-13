@@ -120,8 +120,15 @@
     )
 }
 
-oraTabUI <- function(id, study_ids, study_labels, ora_file_choices) {
+oraTabUI <- function(id, study_ids, study_labels, ora_file_choices, pathway_default = "") {
   ns <- shiny::NS(id)
+  sel <- if (nzchar(as.character(pathway_default)) && as.character(pathway_default) %in% unname(ora_file_choices)) {
+    as.character(pathway_default)
+  } else if (length(ora_file_choices)) {
+    unname(ora_file_choices)[[1L]]
+  } else {
+    NULL
+  }
   shiny::tagList(
     shiny::fluidRow(
       shiny::column(
@@ -133,7 +140,7 @@ oraTabUI <- function(id, study_ids, study_labels, ora_file_choices) {
             ns("pathway_file"),
             "Pathway database:",
             choices = ora_file_choices,
-            selected = if (length(ora_file_choices)) unname(ora_file_choices)[[1L]] else NULL,
+            selected = sel,
             width = "100%"
           )
         ),
@@ -141,19 +148,19 @@ oraTabUI <- function(id, study_ids, study_labels, ora_file_choices) {
         shiny::tags$div(
           class = "text-muted",
           style = "font-size: 0.9rem; margin-bottom: 8px;",
-          "ORA enrichment runs when you change the ",
-          shiny::tags$strong("pathway database"),
-          " (or when no compatible precomputed RDS exists). Sidebar thresholds (min pathway size, min overlap count, min gene ratio, max pathways) only ",
-          shiny::tags$strong("filter"),
-          " results and update the plot instantly. Per-study cache at ",
-          shiny::tags$code("data/<study>/ora/enrichment.rds"),
-          " (from ",
-          shiny::tags$code("Rscript scripts/precompute_ora.R"),
-          ", all pathway files bundled) or legacy ",
+          "Each study’s precomputed table is read from the path in ",
+          shiny::tags$code("config.yaml"),
+          " (key ",
+          shiny::tags$code("ora_file"),
+          ", default ",
+          shiny::tags$code("ora/enrichment.rds"),
+          "). The app uses that RDS when it contains the selected pathway database (same version as the app); otherwise it falls back to legacy ",
           shiny::tags$code("data/ora_cache/<pathway_basename>.rds"),
-          " loads instead of running enricher. A ",
-          shiny::tags$strong("progress bar at the bottom of the page"),
-          " appears only while enrichment or cache load runs."
+          ", then runs ",
+          shiny::tags$code("enricher"),
+          ". Sidebar thresholds only ",
+          shiny::tags$strong("filter"),
+          " cached results. A progress bar appears only while loading or computing enrichment."
         )
       )
     ),

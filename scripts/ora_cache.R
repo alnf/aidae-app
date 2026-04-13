@@ -66,6 +66,8 @@ ora_cache_rds_path <- function(pathway_rel_file) {
 }
 
 #' Absolute path to per-study ORA RDS from `data/<study_id>/config.yaml` key `ora_file` (default `ora/enrichment.rds`).
+#'
+#' All ORA-tab cache reads go through this path (`ora_try_load_per_study_caches`); precompute writes the same path.
 study_ora_rds_abs_path <- function(study_id) {
   cfg_path <- file.path("data", study_id, "config.yaml")
   if (!file.exists(cfg_path)) {
@@ -112,6 +114,8 @@ study_ora_rds_compatible <- function(obj, pathway_rel_file, study_id) {
 }
 
 #' Try loading per-study RDS files (one `long_df` per study, all DEG lists in `comparison` column).
+#' Paths come from each study’s `config.yaml` via `study_ora_rds_abs_path()`. Skips live `enricher` when every
+#' study with DEG lists has a compatible RDS for `pathway_rel_file` (version, pathway membership).
 #' @return `list(ok_all = logical, long_by_sid = named list)`
 ora_try_load_per_study_caches <- function(study_ids, pathway_rel_file) {
   long_by_sid <- list()
