@@ -11,8 +11,14 @@ library(circlize)
 library(yaml)
 
 source("scripts/heatmap_utils.R")
+source("scripts/result_table_indices.R")
 source("scripts/study_data.R")
 source("scripts/perf_utils.R")
+source("scripts/gene_plot.R")
+source("scripts/gene_tab.R")
+source("scripts/pathway_signatures.R")
+source("scripts/ora_cache.R")
+source("scripts/ora_tab.R")
 
 # UI defaults align with make_heatmap() / default_heatmap_thresholds(); study+DEG list can override via config.
 default_thr <- default_heatmap_thresholds()
@@ -64,6 +70,19 @@ default_deg_choices <- if (length(first_study_lists) > 0L) {
   c("(no DEG lists)" = "")
 }
 default_deg <- if (length(first_study_lists) > 0L) first_study_lists[[1L]]$deg_file else ""
+
+pathway_txt_files <- list_pathway_txt_files()
+ora_file_choices <- if (length(pathway_txt_files) > 0L) {
+  c(
+    `Select pathway database…` = "",
+    stats::setNames(
+      pathway_txt_files,
+      gsub("_", " ", tools::file_path_sans_ext(pathway_txt_files), fixed = TRUE)
+    )
+  )
+} else {
+  c("(no pathway files in databases/pathways)" = "")
+}
 
 # Brush action is defined in server and uses current study data from reactiveValues.
 # It updates the MA-plot, volcano plot and result table for the selected genes.
@@ -132,6 +151,23 @@ body <- dashboardBody(
       padding-left: 0;
       margin-left: 0;
     }
+    /* withProgress() bar: default Shiny placement is bottom; anchor to top of viewport */
+    .shiny-progress {
+      position: fixed !important;
+      top: 0 !important;
+      bottom: auto !important;
+      left: 0 !important;
+      right: 0 !important;
+      width: 100% !important;
+      padding: 10px 16px 8px 16px !important;
+      margin: 0 !important;
+      z-index: 2000 !important;
+      background: rgba(255, 255, 255, 0.97) !important;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12) !important;
+    }
+    .shiny-progress .progress {
+      margin-bottom: 4px !important;
+    }
   ")),
   tabItems(
     tabItem(
@@ -174,8 +210,18 @@ body <- dashboardBody(
     ),
     tabItem(
       tabName = "gene",
-      box(title = "Gene", width = 12, solidHeader = TRUE, status = "secondary",
-        p("Gene-level content to be added.")
+      box(
+        title = "Gene expression by study",
+        width = 12, solidHeader = TRUE, status = "secondary",
+        geneTabUI("gene", study_ids, stats::setNames(study_labels, study_ids))
+      )
+    ),
+    tabItem(
+      tabName = "ora",
+      box(
+        title = "Overrepresentation analysis (ORA)",
+        width = 12, solidHeader = TRUE, status = "secondary",
+        oraTabUI("ora", study_ids, stats::setNames(study_labels, study_ids), ora_file_choices)
       )
     )
   )
@@ -192,24 +238,49 @@ ui <- secure_app(dashboardPage(
     navbarMenu(
       id = "navtabs",
       navbarTab(tabName = "degs", text = "DEGs"),
-      navbarTab(tabName = "gene", text = "Gene")
+      navbarTab(tabName = "gene", text = "Gene"),
+      navbarTab(tabName = "ora", text = "ORA")
     )
   ),
   sidebar = dashboardSidebar(
     minified = FALSE,
-    selectInput("study", label = "Study", choices = study_choices, selected = default_study),
-    selectInput("deg_list", label = "DEG list", choices = default_deg_choices, selected = default_deg),
-    uiOutput("deg_description"),
-    selectInput("fdr", label = "Cutoff for FDRs:", c("0.001" = 0.001, "0.01" = 0.01, "0.05" = 0.05, "0.1" = 0.1), selected = default_thr$fdr),
-    uiOutput("svalue_ui"),
-    uiOutput("base_mean_ui"),
-    numericInput("log2fc", label = "Minimal abs(log2 fold change):", value = default_thr$log2fc),
-    checkboxInput("show_rownames", label = "Show row names on heatmap", value = FALSE),
-    actionButton("filter", label = "Generate heatmap"),
-    br(),
-    actionButton("select_genes_btn", label = "Select genes"),
-    actionButton("clear_genes_btn", label = "Clear genes"),
-    checkboxInput("lock_gene_list", label = "Apply selected genes across studies", value = TRUE)
+    # DEGs tab only: heatmap / table controls.
+    shiny::conditionalPanel(
+      condition = "input.navtabs == 'degs'",
+      selectInput("study", label = "Study", choices = study_choices, selected = default_study),
+      selectInput("deg_list", label = "DEG list", choices = default_deg_choices, selected = default_deg),
+      uiOutput("deg_description"),
+      selectInput("fdr", label = "Cutoff for FDRs:", c("0.001" = 0.001, "0.01" = 0.01, "0.05" = 0.05, "0.1" = 0.1), selected = default_thr$fdr),
+      uiOutput("svalue_ui"),
+      uiOutput("base_mean_ui"),
+      numericInput("log2fc", label = "Minimal abs(log2 fold change):", value = default_thr$log2fc),
+      checkboxInput("show_rownames", label = "Show row names on heatmap", value = FALSE),
+      actionButton("filter", label = "Generate heatmap"),
+      br(),
+      actionButton("select_genes_btn", label = "Select genes"),
+      actionButton("clear_genes_btn", label = "Clear genes"),
+      checkboxInput("lock_gene_list", label = "Apply selected genes across studies", value = TRUE)
+    ),
+    shiny::conditionalPanel(
+      condition = "input.navtabs == 'ora'",
+      numericInput("ora_min_overlap", label = "Minimum pathway size (minGSSize):", value = 10L, min = 1L, step = 1L),
+      numericInput("ora_min_count", label = "Minimum overlap (Count):", value = 5L, min = 1L, step = 1L),
+      numericInput("ora_min_gene_ratio", label = "Minimum gene ratio:", value = 0.1, min = 0, max = 1, step = 0.01),
+      numericInput("ora_show_category", label = "Max pathways to show:", value = 20L, min = 1L, step = 1L),
+      tags$div(
+        class = "text-muted",
+        style = "padding: 8px 0; font-size: 0.9rem;",
+        "Gene sets use thresholds from config (study-level and per DEG list), or app defaults — not the DEGs sidebar sliders."
+      )
+    ),
+    shiny::conditionalPanel(
+      condition = "input.navtabs == 'gene'",
+      tags$div(
+        class = "text-muted",
+        style = "padding: 10px 12px; font-size: 0.9rem;",
+        "Study, DEG list, and heatmap filters apply to the DEGs tab. Choose a gene in the main panel."
+      )
+    )
   ),
   controlbar = dashboardControlbar(disable = TRUE),
   body = body
@@ -220,6 +291,8 @@ server <- function(input, output, session) {
     check_credentials = check_credentials(credentials)
   )
 
+  geneTabServer("gene", study_ids, stats::setNames(study_labels, study_ids))
+
   rv <- reactiveValues(
     current_res = NULL,
     current_mm = NULL,
@@ -228,7 +301,56 @@ server <- function(input, output, session) {
     selected_rows = NULL,
     custom_genes = NULL,
     custom_genes_study = NULL,
-    threshold_defaults = default_heatmap_thresholds()
+    threshold_defaults = default_heatmap_thresholds(),
+    deg_snapshot = list(
+      study = default_study,
+      deg_list = default_deg,
+      fdr = default_thr$fdr,
+      log2fc = default_thr$log2fc,
+      base_mean = default_thr$base_mean,
+      svalue = default_thr$svalue,
+      lock_gene_list = TRUE
+    )
+  )
+
+  shiny::observe({
+    shiny::req(input$navtabs == "degs")
+    shiny::req(input$study, input$deg_list)
+    if (is.null(input$study) || input$study == "" || is.null(input$deg_list) || input$deg_list == "") {
+      return()
+    }
+    d <- default_heatmap_thresholds()
+    rv$deg_snapshot <- list(
+      study = input$study,
+      deg_list = input$deg_list,
+      fdr = as.numeric(input$fdr),
+      log2fc = input$log2fc,
+      base_mean = if (!is.null(input$base_mean)) as.numeric(input$base_mean) else d$base_mean,
+      svalue = if (!is.null(input$svalue)) as.numeric(input$svalue) else d$svalue,
+      lock_gene_list = isTRUE(input$lock_gene_list)
+    )
+  })
+
+  ora_input <- shiny::reactive({
+    mo <- if (is.null(input$ora_min_overlap)) 10L else input$ora_min_overlap
+    mc <- if (is.null(input$ora_min_count)) 5L else input$ora_min_count
+    mgr <- if (is.null(input$ora_min_gene_ratio)) 0.1 else as.numeric(input$ora_min_gene_ratio)
+    if (is.na(mgr) || mgr < 0) mgr <- 0
+    if (mgr > 1) mgr <- 1
+    sc <- if (is.null(input$ora_show_category)) 20L else input$ora_show_category
+    list(
+      min_overlap = mo,
+      min_count = mc,
+      min_gene_ratio = mgr,
+      show_category = sc
+    )
+  })
+
+  oraTabServer(
+    "ora",
+    study_ids,
+    stats::setNames(study_labels, study_ids),
+    ora_input
   )
 
   # Dynamic title for result table: threshold-filtered genes, or sub-heatmap selection
@@ -393,31 +515,29 @@ server <- function(input, output, session) {
     res <- rv$current_res
     mm <- rv$current_mm
     if (is.null(res) || is.null(mm)) return(NULL)
-    if (!is.null(rv$selected_rows) && length(rv$selected_rows) > 0) {
-      return(rv$selected_rows)
+    sval <- if ("svalue" %in% colnames(res)) {
+      as.numeric(if (!is.null(input$svalue)) input$svalue else default_heatmap_thresholds()$svalue)
+    } else {
+      default_heatmap_thresholds()$svalue
     }
-    sval <- if ("svalue" %in% colnames(res)) as.numeric(if (!is.null(input$svalue)) input$svalue else default_heatmap_thresholds()$svalue) else default_heatmap_thresholds()$svalue
-    bmean <- if ("baseMean" %in% colnames(res)) as.numeric(if (!is.null(input$base_mean)) input$base_mean else default_heatmap_thresholds()$base_mean) else 0
-    fdr <- as.numeric(input$fdr)
-    log2fc <- input$log2fc
-    use_custom <- !is.null(rv$custom_genes) &&
-      length(rv$custom_genes) > 0 &&
-      (isTRUE(input$lock_gene_list) ||
-        (!is.null(rv$custom_genes_study) && identical(input$study, rv$custom_genes_study)))
-    if (use_custom) {
-      genes_vec <- unique(trimws(rv$custom_genes))
-      genes_vec <- genes_vec[nzchar(genes_vec)]
-      if (length(genes_vec) == 0L) return(integer(0))
-      sel <- tolower(res$symbol) %in% tolower(genes_vec)
-      if (!any(sel)) return(integer(0))
-      res_sub <- res[sel, , drop = FALSE]
-      mm_sub <- mm[res_sub$ens_gene, , drop = FALSE]
-      idx_sub <- filter_heatmap_row_index(res_sub, mm_sub, fdr, bmean, log2fc, sval)
-      if (is.null(idx_sub) || length(idx_sub) == 0L) return(integer(0))
-      return(which(sel)[idx_sub])
+    bmean <- if ("baseMean" %in% colnames(res)) {
+      as.numeric(if (!is.null(input$base_mean)) input$base_mean else default_heatmap_thresholds()$base_mean)
+    } else {
+      0
     }
-    idx <- filter_heatmap_row_index(res, mm, fdr, bmean, log2fc, sval)
-    if (is.null(idx) || length(idx) == 0L) integer(0) else idx
+    result_table_row_indices_for_study(
+      res, mm,
+      active_study_id = input$study,
+      this_study_id = input$study,
+      selected_rows = rv$selected_rows,
+      custom_genes = rv$custom_genes,
+      custom_genes_study = rv$custom_genes_study,
+      lock_gene_list = input$lock_gene_list,
+      fdr = as.numeric(input$fdr),
+      log2fc = input$log2fc,
+      base_mean = bmean,
+      svalue = sval
+    )
   }
 
   observe({

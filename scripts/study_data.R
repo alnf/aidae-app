@@ -2,6 +2,8 @@
 .study_data_cache <- new.env(parent = emptyenv())
 .metadata_cache <- new.env(parent = emptyenv())
 .comparison_cache <- new.env(parent = emptyenv())
+# Gene tab: full-sample counts + metadata; global DEGs long table (separate from heatmap cache keys)
+.gene_tab_cache <- new.env(parent = emptyenv())
 
 study_deg_lists <- function(study_id) {
   if (is.null(study_id) || study_id == "") return(list())
@@ -221,5 +223,100 @@ deg_list_threshold_defaults <- function(study_id, deg_file) {
   }
 
   d
+}
+
+# Full expression matrix + metadata for the Gene tab (all samples in both tables; no DEG metadata_filter).
+# Cached under gene_tab_study|<study_id>. Returns NULL on failure, else list(mm, metadata, study_id, cfg).
+load_gene_tab_study <- function(study_id) {
+  if (is.null(study_id) || study_id == "") return(NULL)
+  cache_key <- paste0("gene_tab_study|", study_id)
+  if (exists(cache_key, envir = .gene_tab_cache, inherits = FALSE)) {
+    return(get(cache_key, envir = .gene_tab_cache, inherits = FALSE))
+  }
+  cfg_path <- file.path("data", study_id, "config.yaml")
+  if (!file.exists(cfg_path)) return(NULL)
+  cfg <- yaml::read_yaml(cfg_path)
+  if (is.null(cfg$counts_file) || is.null(cfg$metadata_file)) return(NULL)
+  counts_path <- file.path("data", study_id, cfg$counts_file)
+  meta_path <- file.path("data", study_id, cfg$metadata_file)
+  if (!file.exists(counts_path) || !file.exists(meta_path)) return(NULL)
+  counts_rds_path <- sub("\\.(tsv|txt|csv)$", ".rds", counts_path, ignore.case = TRUE)
+  if (identical(counts_rds_path, counts_path)) {
+    counts_rds_path <- paste0(counts_path, ".rds")
+  }
+
+  mm <- perf_time(
+    sprintf("load_gene_tab_study[%s]: read_counts", study_id),
+    {
+      if (file.exists(counts_rds_path)) {
+        message("Using counts RDS file at ", counts_rds_path)
+        readRDS(counts_rds_path)
+      } else {
+        read.table(counts_path, sep = "\t", header = TRUE, check.names = FALSE)
+      }
+    }
+  )
+
+  meta_key <- paste(study_id, cfg$metadata_file, sep = "|")
+  if (exists(meta_key, envir = .metadata_cache, inherits = FALSE)) {
+    meta <- get(meta_key, envir = .metadata_cache, inherits = FALSE)
+  } else {
+    meta <- perf_time(
+      sprintf("load_gene_tab_study[%s]: read_metadata", study_id),
+      read.table(meta_path, sep = "\t", header = TRUE, check.names = FALSE)
+    )
+    assign(meta_key, meta, envir = .metadata_cache)
+  }
+
+  if (!all(c("SampleNumber", "PhenoNames") %in% colnames(meta))) return(NULL)
+
+  sample_cols <- colnames(mm)
+  meta_ids <- as.character(meta$SampleNumber)
+  common <- intersect(sample_cols, meta_ids)
+  if (length(common) == 0L) return(NULL)
+
+  mm <- mm[, common, drop = FALSE]
+  idx <- match(colnames(mm), meta_ids)
+  ok <- !is.na(idx)
+  if (!all(ok)) {
+    mm <- mm[, ok, drop = FALSE]
+    idx <- idx[ok]
+  }
+  metadata <- meta[idx, , drop = FALSE]
+  rownames(metadata) <- NULL
+
+  out <- list(mm = mm, metadata = metadata, study_id = study_id, cfg = cfg)
+  assign(cache_key, out, envir = .gene_tab_cache)
+  out
+}
+
+# Precomputed global DEGs long table (cfg$gdegs_file). NULL if unset, missing, or unreadable. Cached as gene_tab_gdegs|<study_id>.
+load_gene_tab_gdegs <- function(study_id) {
+  if (is.null(study_id) || study_id == "") return(NULL)
+  cache_key <- paste0("gene_tab_gdegs|", study_id)
+  if (exists(cache_key, envir = .gene_tab_cache, inherits = FALSE)) {
+    return(get(cache_key, envir = .gene_tab_cache, inherits = FALSE))
+  }
+  cfg_path <- file.path("data", study_id, "config.yaml")
+  if (!file.exists(cfg_path)) return(NULL)
+  cfg <- yaml::read_yaml(cfg_path)
+  rel <- cfg$gdegs_file
+  if (is.null(rel) || !nzchar(as.character(rel))) {
+    assign(cache_key, NULL, envir = .gene_tab_cache)
+    return(NULL)
+  }
+  path <- file.path("data", study_id, rel)
+  if (!file.exists(path)) {
+    assign(cache_key, NULL, envir = .gene_tab_cache)
+    return(NULL)
+  }
+  ext <- tolower(tools::file_ext(path))
+  tab <- if (ext %in% c("rds")) {
+    readRDS(path)
+  } else {
+    read.table(path, sep = "\t", header = TRUE, check.names = FALSE, stringsAsFactors = FALSE)
+  }
+  assign(cache_key, tab, envir = .gene_tab_cache)
+  tab
 }
 
