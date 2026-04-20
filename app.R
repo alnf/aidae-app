@@ -71,9 +71,9 @@ default_deg_choices <- if (length(first_study_lists) > 0L) {
 }
 default_deg <- if (length(first_study_lists) > 0L) first_study_lists[[1L]]$deg_file else ""
 
-pathway_txt_files <- list_pathway_txt_files()
-# Default = first pathway so ORA tab reads per-study RDS (config key `ora_file`) without an extra click.
-ora_pathway_default <- if (length(pathway_txt_files) > 0L) pathway_txt_files[[1L]] else ""
+pathway_txt_files <- list_ora_pathway_files(study_ids)
+# Start empty so ORA does not load until the user picks a pathway database.
+ora_pathway_default <- ""
 ora_file_choices <- if (length(pathway_txt_files) > 0L) {
   stats::setNames(
     pathway_txt_files,

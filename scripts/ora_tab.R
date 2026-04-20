@@ -122,13 +122,11 @@
 
 oraTabUI <- function(id, study_ids, study_labels, ora_file_choices, pathway_default = "") {
   ns <- shiny::NS(id)
-  sel <- if (nzchar(as.character(pathway_default)) && as.character(pathway_default) %in% unname(ora_file_choices)) {
-    as.character(pathway_default)
-  } else if (length(ora_file_choices)) {
-    unname(ora_file_choices)[[1L]]
-  } else {
-    NULL
+  choices_with_empty <- ora_file_choices
+  if (!("" %in% unname(choices_with_empty))) {
+    choices_with_empty <- c("Select a pathway database..." = "", choices_with_empty)
   }
+  sel <- ""
   shiny::tagList(
     shiny::fluidRow(
       shiny::column(
@@ -139,7 +137,7 @@ oraTabUI <- function(id, study_ids, study_labels, ora_file_choices, pathway_defa
           shiny::selectInput(
             ns("pathway_file"),
             "Pathway database:",
-            choices = ora_file_choices,
+            choices = choices_with_empty,
             selected = sel,
             width = "100%"
           )
@@ -185,10 +183,13 @@ oraTabServer <- function(id, study_ids, study_labels, ora_input) {
   shiny::moduleServer(id, function(input, output, session) {
     # Heavy: cache load or enricher — depends on pathway file only (not sidebar thresholds).
     ora_long_source <- shiny::reactive({
-      shiny::req(!is.null(input$pathway_file))
-      shiny::req(nzchar(as.character(input$pathway_file)))
-
-      pathway_file <- as.character(input$pathway_file)
+      pathway_file <- if (is.null(input$pathway_file)) "" else as.character(input$pathway_file)
+      if (!nzchar(pathway_file)) {
+        return(list(
+          error = "Select a pathway database to load ORA results.",
+          long_by_sid = NULL
+        ))
+      }
 
       per <- ora_try_load_per_study_caches(study_ids, pathway_file)
       if (isTRUE(per$ok_all)) {
@@ -206,6 +207,18 @@ oraTabServer <- function(id, study_ids, study_labels, ora_input) {
             long_by_sid = ora_cache_subset_studies(cached$long_by_sid, study_ids)
           ))
         }
+      }
+
+      pathway_abs <- file.path("databases", "pathways", pathway_file)
+      if (!file.exists(pathway_abs)) {
+        return(list(
+          error = paste0(
+            "No cached ORA RDS found for selected pathway database and pathway file is missing: ",
+            pathway_file,
+            ". Precompute enrichment.rds or add the pathway .txt file."
+          ),
+          long_by_sid = NULL
+        ))
       }
 
       if (!requireNamespace("clusterProfiler", quietly = TRUE)) {

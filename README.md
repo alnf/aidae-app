@@ -42,6 +42,15 @@ install.packages(c(
 
 **ComplexHeatmap** and **InteractiveComplexHeatmap** may need [Bioconductor](https://bioconductor.org/) if you install them with `BiocManager::install()` rather than CRAN mirrors that carry them.
 
+### Optional raster backends for heatmaps
+
+The heatmap code uses raster rendering for performance and selects a backend at runtime:
+
+- If **ragg** is installed, it uses `agg_png`.
+- Otherwise it falls back to base `png`.
+
+No ImageMagick / **magick** package is required for this path.
+
 ### Gene tab (optional boxplots)
 
 The **Gene** tab draws per-study gene boxplots with `ggplot2` / **ggpubr** / **ggnewscale**. If these are missing, the tab still loads, but plots show a short message instead of the figure.
@@ -62,6 +71,27 @@ BiocManager::install("clusterProfiler")
 ```
 
 **ggplot2** is required for plots (often already installed with the Gene tab).
+
+Optional key **`pathways_list`** can be set in root `config.yaml` and/or per-study `data/<study_id>/config.yaml`.
+
+- In root `config.yaml`, `pathways_list` can be either:
+  - a vector of pathway filenames (e.g. `KEGG_2019_Mouse.txt`), or
+  - a path to a list file (e.g. `databases/pathways_list.yaml`).
+- In per-study config, `pathways_list` is a vector of pathway filenames.
+
+If any configured list is present, the ORA pathway dropdown uses the union of those names and does not scan all files under `databases/pathways/`. If none are configured, the app falls back to scanning `databases/pathways/*.txt` as before.
+
+To generate a ready-to-use list file from the current pathway folder, run:
+
+```r
+Rscript scripts/generate_pathways_list.R --out databases/pathways_list.yaml
+```
+
+This writes `databases/pathways_list.yaml` with a `pathways_list:` key. You can reference it directly from root config:
+
+```yaml
+pathways_list: databases/pathways_list.yaml
+```
 
 ### Gene tab: precomputed DE long file (`gdegs_file`)
 

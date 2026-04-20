@@ -51,6 +51,8 @@ make_heatmap <- function(res, mm, fdr = 0.05, base_mean = 0, log2fc = 1, svalue 
     top_anno <- HeatmapAnnotation(PhenoNames = pheno, col = col_list, show_legend = TRUE)
   }
   row_km_arg <- if (n_row >= 3L && n_col >= 2L) 2L else NULL
+  has_ragg <- requireNamespace("ragg", quietly = TRUE)
+  raster_device <- if (has_ragg) "agg_png" else "png"
   ht <- Heatmap(
     m_z, name = "z-score",
     show_row_names = show_row_names, show_column_names = FALSE,
@@ -60,9 +62,8 @@ make_heatmap <- function(res, mm, fdr = 0.05, base_mean = 0, log2fc = 1, svalue 
     column_title = paste0(n_row, " significant genes with FDR < ", fdr),
     top_annotation = top_anno,
     use_raster = TRUE,
-    raster_device = "png",
-    raster_quality = 1,
-    raster_by_magick = TRUE
+    raster_device = raster_device,
+    raster_quality = 1
   )
   if ("baseMean" %in% colnames(res)) {
     ht <- ht + Heatmap(

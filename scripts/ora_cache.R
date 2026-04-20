@@ -185,6 +185,72 @@ ora_long_df_empty_rows <- function(pathway_rel_file = NULL) {
   df
 }
 
+ora_deg_entry_comparison_label <- function(entry) {
+  if (!is.null(entry$label) && nzchar(as.character(entry$label))) {
+    as.character(entry$label)
+  } else {
+    basename(as.character(entry$deg_file))
+  }
+}
+
+#' Keep one DEG list entry; `deg_filter` is `list(deg_file = "...")` or `list(label = "...")` (paths as in config).
+ora_filter_deg_lists <- function(lists, deg_filter) {
+  if (is.null(deg_filter)) {
+    return(lists)
+  }
+  if (!is.null(deg_filter$deg_file) && nzchar(as.character(deg_filter$deg_file))) {
+    target <- as.character(deg_filter$deg_file)
+    hit <- vapply(lists, function(e) {
+      identical(as.character(e$deg_file), target)
+    }, logical(1L))
+  } else if (!is.null(deg_filter$label) && nzchar(as.character(deg_filter$label))) {
+    target <- as.character(deg_filter$label)
+    hit <- vapply(lists, function(e) {
+      lbl <- if (!is.null(e$label) && nzchar(as.character(e$label))) {
+        as.character(e$label)
+      } else {
+        basename(as.character(e$deg_file))
+      }
+      identical(lbl, target)
+    }, logical(1L))
+  } else {
+    stop("deg_filter must contain deg_file or label", call. = FALSE)
+  }
+  n <- sum(hit)
+  if (n < 1L) {
+    stop("No deg_lists entry matches --deg-file / --deg-label", call. = FALSE)
+  }
+  if (n > 1L) {
+    stop("Multiple deg_lists entries match --deg-file / --deg-label", call. = FALSE)
+  }
+  lists[hit]
+}
+
+#' Replace rows for `comparison` × `pathway_file` in `pathway_files_ok` with `new_df` (partial ORA refresh).
+ora_long_df_merge_replace_comparison_pathways <- function(
+    existing_df,
+    new_df,
+    comparison_label,
+    pathway_files_ok) {
+  cmp <- as.character(comparison_label)
+  pf_ok <- unique(as.character(pathway_files_ok))
+  base <- existing_df
+  if (!is.null(base) && nrow(base) > 0L && "pathway_file" %in% colnames(base) && "comparison" %in% colnames(base)) {
+    ex_cmp <- as.character(base$comparison)
+    ex_pf <- as.character(base$pathway_file)
+    keep <- !(ex_cmp == cmp & ex_pf %in% pf_ok)
+    base <- base[keep, , drop = FALSE]
+  } else if (is.null(base) && !is.null(new_df) && nrow(new_df) > 0L) {
+    base <- new_df[integer(0), , drop = FALSE]
+  } else if (is.null(base)) {
+    base <- ora_long_df_empty_rows(pathway_rel_file = if (length(pf_ok) > 0L) pf_ok[[1L]] else NULL)
+  }
+  if (is.null(new_df) || nrow(new_df) < 1L) {
+    return(base)
+  }
+  rbind(base, new_df)
+}
+
 ora_enrichment_long_df_single_study <- function(
     sid,
     study_label,
@@ -193,11 +259,13 @@ ora_enrichment_long_df_single_study <- function(
     max_gs_size,
     progress,
     den,
-    pathway_rel_file = NULL) {
+    pathway_rel_file = NULL,
+    deg_filter = NULL) {
   lists <- study_deg_lists(sid)
   if (length(lists) == 0L) {
     return(NULL)
   }
+  lists <- ora_filter_deg_lists(lists, deg_filter)
 
   long_rows <- list()
   study_lbl <- study_label

@@ -106,10 +106,17 @@ load_study_data <- function(study_id, deg_file) {
 
   deg_path <- file.path("data", study_id, deg_file)
   counts_path <- file.path("data", study_id, cfg$counts_file)
-  if (!file.exists(deg_path) || !file.exists(counts_path)) return(list(res = NULL, mm = NULL, col_annot = NULL))
+  if (!file.exists(deg_path)) return(list(res = NULL, mm = NULL, col_annot = NULL))
+  counts_eds_path <- sub("\\.(tsv|txt|csv|rds)$", ".eds", counts_path, ignore.case = TRUE)
+  if (identical(counts_eds_path, counts_path)) {
+    counts_eds_path <- paste0(counts_path, ".eds")
+  }
   counts_rds_path <- sub("\\.(tsv|txt|csv)$", ".rds", counts_path, ignore.case = TRUE)
   if (identical(counts_rds_path, counts_path)) {
     counts_rds_path <- paste0(counts_path, ".rds")
+  }
+  if (!file.exists(counts_eds_path) && !file.exists(counts_rds_path) && !file.exists(counts_path)) {
+    return(list(res = NULL, mm = NULL, col_annot = NULL))
   }
 
   res <- perf_time(
@@ -123,7 +130,10 @@ load_study_data <- function(study_id, deg_file) {
   mm <- perf_time(
     sprintf("load_study_data[%s|%s]: read_counts", study_id, deg_file),
     {
-      if (file.exists(counts_rds_path)) {
+      if (file.exists(counts_eds_path)) {
+        message("Using counts EDS file at ", counts_eds_path)
+        readRDS(counts_eds_path)
+      } else if (file.exists(counts_rds_path)) {
         message("Using counts RDS file at ", counts_rds_path)
         readRDS(counts_rds_path)
       } else {
@@ -239,16 +249,24 @@ load_gene_tab_study <- function(study_id) {
   if (is.null(cfg$counts_file) || is.null(cfg$metadata_file)) return(NULL)
   counts_path <- file.path("data", study_id, cfg$counts_file)
   meta_path <- file.path("data", study_id, cfg$metadata_file)
-  if (!file.exists(counts_path) || !file.exists(meta_path)) return(NULL)
+  counts_eds_path <- sub("\\.(tsv|txt|csv|rds)$", ".eds", counts_path, ignore.case = TRUE)
+  if (identical(counts_eds_path, counts_path)) {
+    counts_eds_path <- paste0(counts_path, ".eds")
+  }
   counts_rds_path <- sub("\\.(tsv|txt|csv)$", ".rds", counts_path, ignore.case = TRUE)
   if (identical(counts_rds_path, counts_path)) {
     counts_rds_path <- paste0(counts_path, ".rds")
   }
+  if (!file.exists(meta_path)) return(NULL)
+  if (!file.exists(counts_eds_path) && !file.exists(counts_rds_path) && !file.exists(counts_path)) return(NULL)
 
   mm <- perf_time(
     sprintf("load_gene_tab_study[%s]: read_counts", study_id),
     {
-      if (file.exists(counts_rds_path)) {
+      if (file.exists(counts_eds_path)) {
+        message("Using counts EDS file at ", counts_eds_path)
+        readRDS(counts_eds_path)
+      } else if (file.exists(counts_rds_path)) {
         message("Using counts RDS file at ", counts_rds_path)
         readRDS(counts_rds_path)
       } else {

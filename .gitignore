@@ -56,6 +56,7 @@ rsconnect-python/
 # Sensitive information
 .cursor/
 data/
+data*
 databases/
 rsconnect.sh
 *.code-workspace
