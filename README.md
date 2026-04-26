@@ -63,14 +63,24 @@ install.packages(c("ggplot2", "ggpubr", "ggnewscale"))
 
 ### ORA tab (overrepresentation)
 
-The **ORA** tab uses **clusterProfiler** (`enricher`) on a chosen pathway database file under `databases/pathways/` (all pathways in that file). For each study, enrichment runs **for every DEG list** in that study’s `config.yaml`, using **thresholds from the config** (study-level `thresholds` and optional per-list `deg_lists[].thresholds`), merged with the same defaults as the heatmap (`deg_list_threshold_defaults()`). A **single ggplot** uses **facets by study** so you can compare studies side by side: **comparisons (DEG list labels) on the x-axis**, **pathways on the y-axis**, **Gene ratio** as a **blue–red** colour scale, and **overlap count** as point size (p-values are not mapped to aesthetics; they are only used internally to pick the top pathways to display). Install from Bioconductor, for example:
+The **ORA** tab uses **clusterProfiler** (`enricher`) on a chosen pathway database file under `databases/pathways/` (all pathways in that file). For each study, enrichment runs **for every DEG list** in that study’s `config.yaml`, using **thresholds from the config** (study-level `thresholds` and optional per-list `deg_lists[].thresholds`), merged with the same defaults as the heatmap (`deg_list_threshold_defaults()`). A faceted ORA dot plot shows **comparisons (DEG list labels) on the x-axis**, **pathways on the y-axis**, **Gene ratio** as a blue-red colour scale, and **overlap count** as point size (p-values are not mapped to aesthetics; they are used internally to rank pathways).
+
+The ORA dot plot is interactive with **ggiraph**:
+- click a dot and interpret it as **Pathway (row intent)** to build a heatplot of pathway genes x all study comparisons (cell = `log2FC`);
+- click a dot and interpret it as **Comparison (column intent)** to build a classical heatplot of pathways x genes for the selected comparison (cell = `log2FC`).
+
+Install from Bioconductor, for example:
 
 ```r
 if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
 BiocManager::install("clusterProfiler")
 ```
 
-**ggplot2** is required for plots (often already installed with the Gene tab).
+**ggplot2** and **ggiraph** are required for ORA plotting/interactivity:
+
+```r
+install.packages(c("ggplot2", "ggiraph"))
+```
 
 Optional key **`pathways_list`** can be set in root `config.yaml` and/or per-study `data/<study_id>/config.yaml`.
 

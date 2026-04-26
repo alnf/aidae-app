@@ -266,6 +266,20 @@ ui <- secure_app(dashboardPage(
       numericInput("ora_min_count", label = "Minimum overlap (Count):", value = 5L, min = 1L, step = 1L),
       numericInput("ora_min_gene_ratio", label = "Minimum gene ratio:", value = 0.1, min = 0, max = 1, step = 0.01),
       numericInput("ora_show_category", label = "Max pathways to show:", value = 20L, min = 1L, step = 1L),
+      radioButtons(
+        "ora_heatmap_click_target",
+        "Dot click interprets as:",
+        choices = c("Pathway (row intent)" = "pathway", "Comparison (column intent)" = "comparison"),
+        selected = "pathway"
+      ),
+      shiny::conditionalPanel(
+        condition = "input.navtabs == 'ora' && input.ora_heatmap_click_target == 'pathway'",
+        checkboxInput(
+          "ora_pathway_hide_empty_comparisons",
+          label = "Hide comparisons without significant pathways",
+          value = TRUE
+        )
+      ),
       tags$div(
         class = "text-muted",
         style = "padding: 8px 0; font-size: 0.9rem;",
@@ -290,7 +304,14 @@ server <- function(input, output, session) {
     check_credentials = check_credentials(credentials)
   )
 
-  geneTabServer("gene", study_ids, stats::setNames(study_labels, study_ids))
+  gene_jump_symbol <- shiny::reactiveVal(NULL)
+
+  geneTabServer(
+    "gene",
+    study_ids,
+    stats::setNames(study_labels, study_ids),
+    external_symbol = shiny::reactive(gene_jump_symbol())
+  )
 
   rv <- reactiveValues(
     current_res = NULL,
@@ -337,11 +358,16 @@ server <- function(input, output, session) {
     if (is.na(mgr) || mgr < 0) mgr <- 0
     if (mgr > 1) mgr <- 1
     sc <- if (is.null(input$ora_show_category)) 20L else input$ora_show_category
+    click_target <- if (is.null(input$ora_heatmap_click_target)) "pathway" else as.character(input$ora_heatmap_click_target)
+    if (!click_target %in% c("pathway", "comparison")) click_target <- "pathway"
+    hide_empty <- if (is.null(input$ora_pathway_hide_empty_comparisons)) TRUE else isTRUE(input$ora_pathway_hide_empty_comparisons)
     list(
       min_overlap = mo,
       min_count = mc,
       min_gene_ratio = mgr,
-      show_category = sc
+      show_category = sc,
+      click_target = click_target,
+      hide_empty_pathway_comparisons = hide_empty
     )
   })
 
@@ -349,7 +375,17 @@ server <- function(input, output, session) {
     "ora",
     study_ids,
     stats::setNames(study_labels, study_ids),
-    ora_input
+    ora_input,
+    on_gene_select = function(symbol) {
+      sym <- trimws(as.character(symbol))
+      if (!nzchar(sym)) return(invisible(NULL))
+      gene_jump_symbol(NULL)
+      gene_jump_symbol(sym)
+      if (requireNamespace("shinydashboard", quietly = TRUE)) {
+        shinydashboard::updateTabItems(session, "navtabs", selected = "gene")
+      }
+      invisible(NULL)
+    }
   )
 
   # Dynamic title for result table: threshold-filtered genes, or sub-heatmap selection

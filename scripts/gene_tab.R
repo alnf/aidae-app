@@ -237,10 +237,13 @@ geneTabUI <- function(id, study_ids, study_labels) {
   )
 }
 
-geneTabServer <- function(id, study_ids, study_labels) {
+geneTabServer <- function(id, study_ids, study_labels, external_symbol = NULL) {
   shiny::moduleServer(id, function(input, output, session) {
+    gene_choices <- shiny::reactiveVal(character(0))
+
     shiny::observe({
       syms <- collect_all_gene_symbols(study_ids)
+      gene_choices(syms)
       shiny::updateSelectizeInput(
         session, "symbol",
         choices = syms,
@@ -260,6 +263,27 @@ geneTabServer <- function(id, study_ids, study_labels) {
       }
       shiny::HTML(createGeneInfoHTML(info, sym))
     })
+
+    shiny::observeEvent(external_symbol(), {
+      sym_raw <- external_symbol()
+      sym <- trimws(as.character(sym_raw))
+      if (!nzchar(sym)) return()
+      choices <- gene_choices()
+      if (length(choices) < 1L) {
+        choices <- collect_all_gene_symbols(study_ids)
+        gene_choices(choices)
+      }
+      key <- tolower(sym)
+      hit <- which(tolower(as.character(choices)) == key)
+      sym_sel <- if (length(hit) > 0L) as.character(choices[[hit[[1L]]]]) else sym
+      shiny::updateSelectizeInput(
+        session,
+        "symbol",
+        choices = choices,
+        selected = sym_sel,
+        server = TRUE
+      )
+    }, ignoreInit = TRUE)
 
     for (sid in study_ids) {
       local({
