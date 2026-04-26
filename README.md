@@ -69,6 +69,8 @@ The ORA dot plot is interactive with **ggiraph**:
 - click a dot and interpret it as **Pathway (row intent)** to build a heatplot of pathway genes x all study comparisons (cell = `log2FC`);
 - click a dot and interpret it as **Comparison (column intent)** to build a classical heatplot of pathways x genes for the selected comparison (cell = `log2FC`).
 
+Sidebar filters for ORA include minimum overlap count, minimum pathway size, minimum gene ratio, and **maximum adjusted p-value (FDR)**. Default FDR cutoff is `1` (no FDR filtering), so behavior stays as before unless you choose a stricter threshold. Top-`N` pathway display still follows existing ranking by enrichment significance (`p_adj` / p-value order).
+
 Install from Bioconductor, for example:
 
 ```r
@@ -80,6 +82,12 @@ BiocManager::install("clusterProfiler")
 
 ```r
 install.packages(c("ggplot2", "ggiraph"))
+```
+
+**Custom ontology (ORA sidebar):** upload an `.xlsx` in **long** format: **column 1 = gene symbol**, **column 2 = category** (pathway). This differs from Enrichr-style `.txt` files in the dropdown (one line per pathway, genes across columns). Here each row assigns one gene to one category; the app derives **one gene set per category** (all symbols in rows with that category), then builds the same `TERM2GENE` table `enricher` expects. **Gene symbols may be lower- or mixed-case in the file; the app uppercases them** so matching to DEG tables is case-insensitive. Category text is kept as in the sheet (trimmed). Named columns `symbol` / `category` are preferred (`gene` / `pathway` allowed; otherwise the first two columns are used). The app runs the same `clusterProfiler::enricher` pipeline as for built-in pathway files (no RDS cache for this mode). Install **readxl**:
+
+```r
+install.packages("readxl")
 ```
 
 Optional key **`pathways_list`** can be set in root `config.yaml` and/or per-study `data/<study_id>/config.yaml`.

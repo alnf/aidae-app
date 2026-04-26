@@ -6,6 +6,9 @@
 ORA_CACHE_VERSION <- 2L
 ORA_CACHE_VERSION_LEGACY <- 1L
 
+# Sentinel pathway key for in-memory custom ontology (not on disk under databases/pathways/).
+ORA_CUSTOM_ONTOLOGY_KEY <- "__custom_ontology__"
+
 ora_gene_ratio_numeric <- function(gr) {
   vapply(seq_along(gr), function(i) {
     parts <- strsplit(trimws(as.character(gr[i])), "/", fixed = TRUE)[[1L]]
@@ -416,7 +419,68 @@ ora_run_enrichment_long_by_study <- function(
       max_gs_size,
       progress,
       den,
-      pathway_rel_file = NULL
+      pathway_rel_file = pathway_rel_file
+    )
+    if (!is.null(df)) {
+      long_by_sid[[sid]] <- df
+    }
+  }
+
+  list(error = NULL, long_by_sid = long_by_sid)
+}
+
+#' Run enricher from an in-memory TERM2GENE table (e.g. custom ontology from .xlsx).
+#'
+#' @param t2g_df `data.frame` with columns `term`, `gene`.
+#' @param pathway_label Value stored in `long_df$pathway_file` (use `ORA_CUSTOM_ONTOLOGY_KEY` for UI custom mode).
+ora_run_enrichment_long_by_study_t2g <- function(
+    study_ids,
+    study_labels,
+    t2g_df,
+    pathway_label = ORA_CUSTOM_ONTOLOGY_KEY,
+    min_gs_size = 1L,
+    max_gs_size = 50000L,
+    progress = NULL) {
+  if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
+    return(list(
+      error = paste0("Install Bioconductor package: BiocManager::install(\"clusterProfiler\")"),
+      long_by_sid = NULL
+    ))
+  }
+  if (is.null(t2g_df) || !is.data.frame(t2g_df) || nrow(t2g_df) < 1L) {
+    return(list(error = "Custom ontology has no term–gene rows.", long_by_sid = NULL))
+  }
+  t2g_u <- data.frame(
+    term = as.character(t2g_df$term),
+    gene = toupper(trimws(as.character(t2g_df$gene))),
+    stringsAsFactors = FALSE
+  )
+  ok <- nzchar(t2g_u$term) & nzchar(t2g_u$gene) & !is.na(t2g_u$gene)
+  t2g_u <- t2g_u[ok, , drop = FALSE]
+  if (nrow(t2g_u) < 1L) {
+    return(list(error = "Custom ontology has no valid term–gene rows.", long_by_sid = NULL))
+  }
+
+  n_steps <- 0L
+  for (sid2 in study_ids) {
+    n_steps <- n_steps + length(study_deg_lists(sid2))
+  }
+  den <- max(1L, n_steps)
+
+  long_by_sid <- list()
+  plab <- as.character(pathway_label)
+
+  for (sid in study_ids) {
+    slbl <- study_labels[[sid]]
+    df <- ora_enrichment_long_df_single_study(
+      sid,
+      slbl,
+      t2g_u,
+      min_gs_size,
+      max_gs_size,
+      progress,
+      den,
+      pathway_rel_file = plab
     )
     if (!is.null(df)) {
       long_by_sid[[sid]] <- df
@@ -434,7 +498,8 @@ ora_build_plot_payload <- function(
     min_ol,
     min_ct,
     min_gene_ratio,
-    n_show) {
+    n_show,
+    max_p_adj = 1) {
   out <- stats::setNames(vector("list", length(study_ids)), study_ids)
   lbs <- list()
 
@@ -464,6 +529,11 @@ ora_build_plot_payload <- function(
     if ("gene_ratio" %in% colnames(df) && min_gene_ratio > 0) {
       gr <- as.numeric(df$gene_ratio)
       ok <- !is.na(gr) & gr >= min_gene_ratio
+      df <- df[ok, , drop = FALSE]
+    }
+    if ("p_adj" %in% colnames(df) && is.finite(max_p_adj) && max_p_adj < 1) {
+      padj <- as.numeric(df$p_adj)
+      ok <- !is.na(padj) & padj <= max_p_adj
       df <- df[ok, , drop = FALSE]
     }
 

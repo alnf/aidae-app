@@ -276,6 +276,50 @@ ora_significant_symbols <- function(study_id, deg_file) {
     return(get(key, envir = .ora_sig_gene_cache, inherits = FALSE))
   }
   thr <- deg_list_threshold_defaults(study_id, deg_file)
+
+  # Fast path: use precomputed gdegs long table when available (avoids loading counts matrices).
+  gdegs <- load_gene_tab_gdegs(study_id)
+  if (!is.null(gdegs) && is.data.frame(gdegs) && "symbol" %in% colnames(gdegs)) {
+    lists <- study_deg_lists(study_id)
+    idx_cmp <- match(as.character(deg_file), vapply(lists, function(x) as.character(x$deg_file), character(1L)))
+    cmp_lbl <- if (!is.na(idx_cmp) && idx_cmp >= 1L) as.character(ora_deg_entry_comparison_label(lists[[idx_cmp]])) else NULL
+    cmp_col <- if ("joint" %in% colnames(gdegs)) {
+      "joint"
+    } else if ("comp" %in% colnames(gdegs)) {
+      "comp"
+    } else {
+      NULL
+    }
+    gsub <- if (!is.null(cmp_col) && !is.null(cmp_lbl) && nzchar(cmp_lbl)) {
+      gdegs[as.character(gdegs[[cmp_col]]) == cmp_lbl, , drop = FALSE]
+    } else {
+      gdegs
+    }
+    if (nrow(gsub) > 0L) {
+      keep <- rep(TRUE, nrow(gsub))
+      if ("padj" %in% colnames(gsub)) {
+        keep <- keep & !is.na(as.numeric(gsub$padj)) & as.numeric(gsub$padj) <= as.numeric(thr$fdr)
+      } else if ("pvalue" %in% colnames(gsub)) {
+        keep <- keep & !is.na(as.numeric(gsub$pvalue)) & as.numeric(gsub$pvalue) <= as.numeric(thr$fdr)
+      }
+      lfc_col <- if ("log2FC" %in% colnames(gsub)) {
+        "log2FC"
+      } else if ("log2FoldChange" %in% colnames(gsub)) {
+        "log2FoldChange"
+      } else {
+        NULL
+      }
+      if (!is.null(lfc_col)) {
+        keep <- keep & !is.na(as.numeric(gsub[[lfc_col]])) & abs(as.numeric(gsub[[lfc_col]])) >= as.numeric(thr$log2fc)
+      }
+      syms <- toupper(trimws(as.character(gsub$symbol[keep])))
+      syms <- unique(syms[!is.na(syms) & nzchar(syms)])
+      assign(key, syms, envir = .ora_sig_gene_cache)
+      return(syms)
+    }
+  }
+
+  # Fallback: full DEG + counts load to apply the exact heatmap threshold logic.
   loaded <- load_study_data(study_id, deg_file)
   res <- loaded$res
   mm <- loaded$mm
@@ -301,8 +345,12 @@ ora_significant_symbols <- function(study_id, deg_file) {
   syms
 }
 
-ora_term_genes <- function(pathway_file, pathway_id, pathway_desc) {
-  t2g <- parse_pathway_file_to_term2gene(pathway_file)
+ora_term_genes <- function(pathway_file, pathway_id, pathway_desc, term2gene_df = NULL) {
+  t2g <- if (!is.null(term2gene_df) && is.data.frame(term2gene_df) && nrow(term2gene_df) > 0L) {
+    term2gene_df
+  } else {
+    parse_pathway_file_to_term2gene(pathway_file)
+  }
   if (is.null(t2g) || nrow(t2g) < 1L) return(character(0))
   term <- as.character(t2g$term)
   keep <- term %in% c(as.character(pathway_id), as.character(pathway_desc))
@@ -342,8 +390,8 @@ ora_read_deg_logfc <- function(study_id, comparison_label, deg_file = NULL) {
   if (nrow(out) > 0L) out else NULL
 }
 
-ora_pathway_genes <- function(pathway_file, pathway_id, pathway_desc) {
-  ora_term_genes(pathway_file, pathway_id, pathway_desc)
+ora_pathway_genes <- function(pathway_file, pathway_id, pathway_desc, term2gene_df = NULL) {
+  ora_term_genes(pathway_file, pathway_id, pathway_desc, term2gene_df = term2gene_df)
 }
 
 ora_build_pathway_mode_matrix <- function(
@@ -353,7 +401,8 @@ ora_build_pathway_mode_matrix <- function(
     study_ids,
     study_labels,
     combined_df,
-    hide_empty_comparisons = FALSE) {
+    hide_empty_comparisons = FALSE,
+    term2gene_df = NULL) {
   pathway_genes <- character(0)
   sub <- NULL
   if (!is.null(combined_df) && nrow(combined_df) > 0L) {
@@ -365,7 +414,7 @@ ora_build_pathway_mode_matrix <- function(
     }
   }
   if (length(pathway_genes) < 1L && !is.null(sub) && nrow(sub) > 0L) {
-    term_genes <- ora_term_genes(pathway_file, pathway_id, pathway_desc)
+    term_genes <- ora_term_genes(pathway_file, pathway_id, pathway_desc, term2gene_df = term2gene_df)
     if (length(term_genes) > 0L) {
       for (i in seq_len(nrow(sub))) {
         sid <- as.character(sub$study_id[i])
@@ -379,7 +428,7 @@ ora_build_pathway_mode_matrix <- function(
     }
   }
   if (length(pathway_genes) < 1L) {
-    pathway_genes <- ora_pathway_genes(pathway_file, pathway_id, pathway_desc)
+    pathway_genes <- ora_pathway_genes(pathway_file, pathway_id, pathway_desc, term2gene_df = term2gene_df)
   }
   if (length(pathway_genes) < 1L) {
     return(list(error = "No genes found for selected pathway.", mat = NULL))
@@ -447,7 +496,12 @@ ora_build_pathway_mode_matrix <- function(
   list(error = NULL, mat = mat, sig_mat = sig_mat)
 }
 
-ora_build_comparison_mode_matrix <- function(pathway_file, selected_sid, selected_comparison, combined_df) {
+ora_build_comparison_mode_matrix <- function(
+    pathway_file,
+    selected_sid,
+    selected_comparison,
+    combined_df,
+    term2gene_df = NULL) {
   if (is.null(combined_df) || nrow(combined_df) < 1L) {
     return(list(error = "No ORA rows available for selected comparison.", mat = NULL, sig_mat = NULL))
   }
@@ -471,7 +525,11 @@ ora_build_comparison_mode_matrix <- function(pathway_file, selected_sid, selecte
   if (is.null(tab) || nrow(tab) < 1L) {
     return(list(error = "Selected comparison DEG table is empty.", mat = NULL, sig_mat = NULL))
   }
-  t2g <- parse_pathway_file_to_term2gene(pathway_file)
+  t2g <- if (!is.null(term2gene_df) && is.data.frame(term2gene_df) && nrow(term2gene_df) > 0L) {
+    term2gene_df
+  } else {
+    parse_pathway_file_to_term2gene(pathway_file)
+  }
   if (is.null(t2g) || nrow(t2g) < 1L) {
     return(list(error = "Pathway database has no term-to-gene mappings.", mat = NULL, sig_mat = NULL))
   }
@@ -723,15 +781,37 @@ oraTabUI <- function(id, study_ids, study_labels, ora_file_choices, pathway_defa
     shiny::fluidRow(
       shiny::column(
         width = 12,
-        shiny::tags$div(
-          class = "ora-pathway-db-select",
-          style = "max-width: 260px;",
-          shiny::selectInput(
-            ns("pathway_file"),
-            "Pathway database:",
-            choices = choices_with_empty,
-            selected = sel,
-            width = "100%"
+        shiny::fluidRow(
+          shiny::column(
+            width = 7,
+            shiny::conditionalPanel(
+              condition = "output.ora_hide_pathway_select == '0'",
+              ns = ns,
+              shiny::tags$div(
+                class = "ora-pathway-db-select",
+                style = "max-width: 280px;",
+                shiny::selectInput(
+                  ns("pathway_file"),
+                  "Pathway database:",
+                  choices = choices_with_empty,
+                  selected = sel,
+                  width = "100%"
+                )
+              )
+            ),
+            shiny::conditionalPanel(
+              condition = "output.ora_hide_pathway_select == '1'",
+              ns = ns,
+              shiny::tags$div(
+                class = "text-muted",
+                style = "font-size: 0.9rem; padding-top: 28px;",
+                "Pathway database selection is disabled while custom ontology is loaded."
+              )
+            )
+          ),
+          shiny::column(
+            width = 5,
+            shiny::uiOutput(ns("ora_pathway_custom_msg"))
           )
         ),
         shiny::tags$hr(),
@@ -757,6 +837,7 @@ oraTabUI <- function(id, study_ids, study_labels, ora_file_choices, pathway_defa
     shiny::fluidRow(
       shiny::column(
         width = 12,
+        shiny::uiOutput(ns("ora_dotplot_status")),
         shiny::tags$div(
           class = "ora-plot-wrap",
           style = "overflow-x: auto; width: 100%; max-width: 100%; min-width: 0;",
@@ -795,21 +876,124 @@ oraTabUI <- function(id, study_ids, study_labels, ora_file_choices, pathway_defa
 }
 
 #' @param ora_input reactive: list(min_overlap, min_count, min_gene_ratio, show_category)
+#' @param copy_genes_trigger reactive trigger for "copy visible genes" action
 #' @param on_gene_select callback(symbol) for opening Gene tab and selecting symbol
-oraTabServer <- function(id, study_ids, study_labels, ora_input, on_gene_select = NULL) {
+#' @param custom_ontology reactive returning `list(active = logical, t2g = data.frame(term, gene) | NULL)`
+oraTabServer <- function(
+    id,
+    study_ids,
+    study_labels,
+    ora_input,
+    copy_genes_trigger = NULL,
+    on_gene_select = NULL,
+    custom_ontology = NULL) {
   shiny::moduleServer(id, function(input, output, session) {
+    .ora_debug_log <- function(...) {
+      message("[ORA debug] ", paste0(..., collapse = ""))
+    }
+
     .ora_pick_discrete_index <- function(v, n) {
       if (is.null(v) || is.na(v)) return(NA_integer_)
       idx <- suppressWarnings(as.integer(round(as.numeric(v))))
       if (is.na(idx) || idx < 1L || idx > n) return(NA_integer_)
       idx
     }
-    # Heavy: cache load or enricher — depends on pathway file only (not sidebar thresholds).
+    output$ora_pathway_custom_msg <- shiny::renderUI({
+      co <- if (is.function(custom_ontology)) custom_ontology() else NULL
+      if (!is.null(co) && is.list(co) && isTRUE(co$active) && is.data.frame(co$t2g) && nrow(co$t2g) > 0L) {
+        shiny::tags$div(
+          style = "color:#c0392b;font-weight:600;padding-top:26px;",
+          "Custom ontology loaded"
+        )
+      } else {
+        NULL
+      }
+    })
+    output$ora_hide_pathway_select <- shiny::renderText({
+      co <- if (is.function(custom_ontology)) custom_ontology() else NULL
+      use_custom <- !is.null(co) && is.list(co) && isTRUE(co$active) && is.data.frame(co$t2g) && nrow(co$t2g) > 0L
+      if (use_custom) "1" else "0"
+    })
+    shiny::outputOptions(output, "ora_hide_pathway_select", suspendWhenHidden = FALSE)
+
+    # Heavy: cache load or enricher — depends on pathway file and optional custom ontology.
     ora_long_source <- shiny::reactive({
+      co <- if (is.function(custom_ontology)) custom_ontology() else NULL
+      use_custom <- !is.null(co) && is.list(co) && isTRUE(co$active) && is.data.frame(co$t2g) && nrow(co$t2g) > 0L
+      if (!is.null(co) && is.list(co) && isTRUE(co$active) && !use_custom) {
+        .ora_debug_log("custom ontology active flag is TRUE but t2g is empty/invalid")
+      }
+      if (use_custom) {
+        n_cat <- length(unique(as.character(co$t2g$term)))
+        n_pairs <- nrow(co$t2g)
+        n_genes <- length(unique(as.character(co$t2g$gene)))
+        .ora_debug_log(
+          "custom ontology active: categories=", n_cat,
+          " pairs=", n_pairs,
+          " unique_genes=", n_genes
+        )
+        if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
+          return(list(
+            error = paste0(
+              "Install Bioconductor package: BiocManager::install(\"clusterProfiler\")"
+            ),
+            long_by_sid = NULL
+          ))
+        }
+        return(shiny::withProgress(message = "Running ORA on custom ontology…", value = 0, {
+          n_steps <- 0L
+          for (sid2 in study_ids) {
+            n_steps <- n_steps + length(study_deg_lists(sid2))
+          }
+          den <- max(1L, n_steps)
+          run <- ora_run_enrichment_long_by_study_t2g(
+            study_ids,
+            study_labels,
+            co$t2g,
+            pathway_label = ORA_CUSTOM_ONTOLOGY_KEY,
+            min_gs_size = 1L,
+            max_gs_size = 50000L,
+            progress = function(amount, detail) {
+              shiny::incProgress(amount, detail = detail)
+            }
+          )
+          if (!is.null(run$error)) {
+            .ora_debug_log("custom ontology run error: ", as.character(run$error))
+            return(list(error = run$error, long_by_sid = NULL))
+          }
+          has_rows <- FALSE
+          row_summ <- character(0)
+          if (!is.null(run$long_by_sid) && length(run$long_by_sid) > 0L) {
+            for (sid in names(run$long_by_sid)) {
+              d0 <- run$long_by_sid[[sid]]
+              n0 <- if (!is.null(d0) && is.data.frame(d0)) nrow(d0) else 0L
+              row_summ <- c(row_summ, paste0(sid, "=", n0))
+              if (!is.null(d0) && is.data.frame(d0) && nrow(d0) > 0L) {
+                has_rows <- TRUE
+                break
+              }
+            }
+          }
+          .ora_debug_log("custom ontology run rows by study: ", paste(row_summ, collapse = ", "))
+          if (!has_rows) {
+            return(list(
+              error = paste0(
+                "Custom ontology loaded but enrichment returned no rows. ",
+                "Likely reasons: no overlap between ontology symbols and significant DEGs ",
+                "(from config thresholds), or overlap exists but enrichment is not significant."
+              ),
+              long_by_sid = NULL
+            ))
+          }
+          list(error = NULL, long_by_sid = run$long_by_sid)
+        }))
+      }
+
       pathway_file <- if (is.null(input$pathway_file)) "" else as.character(input$pathway_file)
+      .ora_debug_log("pathway file mode: pathway_file=", pathway_file)
       if (!nzchar(pathway_file)) {
         return(list(
-          error = "Select a pathway database to load ORA results.",
+          error = "Select a pathway database or load a custom ontology (.xlsx) from the sidebar.",
           long_by_sid = NULL
         ))
       }
@@ -890,21 +1074,89 @@ oraTabServer <- function(id, study_ids, study_labels, ora_input, on_gene_select 
       min_gr <- suppressWarnings(as.numeric(oi$min_gene_ratio))
       if (is.na(min_gr) || min_gr < 0) min_gr <- 0
       if (min_gr > 1) min_gr <- 1
+      max_p_adj <- suppressWarnings(as.numeric(oi$max_p_adj))
+      if (is.na(max_p_adj) || max_p_adj <= 0) max_p_adj <- 1
+      if (max_p_adj > 1) max_p_adj <- 1
       n_show <- suppressWarnings(as.integer(oi$show_category))
       if (is.na(n_show) || n_show < 1L) n_show <- 20L
       n_show <- min(100L, max(1L, n_show))
 
       src <- ora_long_source()
       if (!is.null(src$error)) {
+        .ora_debug_log("ora_long_source error: ", as.character(src$error))
         return(list(error = src$error, by_study = NULL, pathway_level_order = NULL))
       }
-      ora_build_plot_payload(src$long_by_sid, study_ids, study_labels, min_ol, min_ct, min_gr, n_show)
+      ob <- ora_build_plot_payload(src$long_by_sid, study_ids, study_labels, min_ol, min_ct, min_gr, n_show, max_p_adj = max_p_adj)
+      vis_summ <- character(0)
+      for (sid in study_ids) {
+        b <- ob$by_study[[sid]]
+        nvis <- if (!is.null(b) && !is.null(b$plot_df) && is.data.frame(b$plot_df)) nrow(b$plot_df) else 0L
+        vis_summ <- c(vis_summ, paste0(sid, "=", nvis))
+      }
+      .ora_debug_log(
+        "plot payload after filters: min_count=", min_ct,
+        " min_overlap=", min_ol,
+        " min_gene_ratio=", format(min_gr, digits = 3),
+        " max_p_adj=", format(max_p_adj, digits = 3),
+        " n_show=", n_show,
+        " rows_by_study=", paste(vis_summ, collapse = ", ")
+      )
+      ob
     })
 
     study_label_for <- function(sid) {
       lbl <- study_labels[[sid]]
       if (is.null(lbl) || !nzchar(as.character(lbl))) as.character(sid) else as.character(lbl)
     }
+
+    output$ora_dotplot_status <- shiny::renderUI({
+      d <- tryCatch(ora_combined_plot_df(), error = function(e) NULL)
+      if (is.null(d)) return(NULL)
+      co <- if (is.function(custom_ontology)) custom_ontology() else NULL
+      use_custom <- !is.null(co) && is.list(co) && isTRUE(co$active) && is.data.frame(co$t2g) && nrow(co$t2g) > 0L
+      if (!is.null(d$error) && nzchar(as.character(d$error))) {
+        hint <- if (use_custom) {
+          shiny::tags$div(
+            style = "margin-top:10px; font-size:0.9rem; line-height:1.35; color:#333;",
+            shiny::tags$p(
+              style = "margin:0 0 6px 0;",
+              shiny::tags$strong("If you expected results: "),
+              "the run may have completed with ",
+              shiny::tags$strong("no overlapping enrichment"),
+              " (no categories pass statistical overlap), or ",
+              shiny::tags$strong("sidebar filters removed all rows"),
+              " (try lowering minimum overlap count, pathway size, and gene ratio)."
+            ),
+            shiny::tags$p(
+              style = "margin:0;",
+              shiny::tags$strong("Note: "),
+              "ORA uses significant genes from each study’s ",
+              shiny::tags$code("config.yaml"),
+              " thresholds — ",
+              shiny::tags$strong("not"),
+              " the DEGs-tab sliders. Symbols in the .xlsx must match DEG gene symbols (matching is case-insensitive)."
+            )
+          )
+        } else {
+          NULL
+        }
+        shiny::tags$div(
+          class = "alert alert-warning",
+          style = "margin-bottom:12px;",
+          shiny::tags$div(
+            style = "font-weight:700; margin-bottom:6px;",
+            "No ORA dot plot to show"
+          ),
+          shiny::tags$div(
+            style = "white-space:pre-wrap;",
+            htmltools::htmlEscape(as.character(d$error), attribute = FALSE)
+          ),
+          hint
+        )
+      } else {
+        NULL
+      }
+    })
 
     ora_combined_plot_df <- shiny::reactive({
       ob <- ora_by_study()
@@ -1069,9 +1321,16 @@ oraTabServer <- function(id, study_ids, study_labels, ora_input, on_gene_select 
         ))
       }
       pathway_file <- if (is.null(input$pathway_file)) "" else as.character(input$pathway_file)
-      if (!nzchar(pathway_file)) {
+      co <- if (is.function(custom_ontology)) custom_ontology() else NULL
+      term2gene_custom <- if (!is.null(co) && is.list(co) && isTRUE(co$active) && is.data.frame(co$t2g) && nrow(co$t2g) > 0L) {
+        co$t2g
+      } else {
+        NULL
+      }
+      pathway_file_heat <- if (!is.null(term2gene_custom)) "" else pathway_file
+      if (!nzchar(pathway_file_heat) && is.null(term2gene_custom)) {
         return(list(
-          plot = .ora_msg_plot("Select a pathway database to enable heatplot."),
+          plot = .ora_msg_plot("Select a pathway database or load a custom ontology to enable heatplot."),
           mode = "none",
           n_rows = 0L,
           n_cols = 0L,
@@ -1086,13 +1345,14 @@ oraTabServer <- function(id, study_ids, study_labels, ora_input, on_gene_select 
           return(list(plot = .ora_msg_plot(d$error), mode = "none", n_rows = 0L, n_cols = 0L, mat = NULL))
         }
         pm <- ora_build_pathway_mode_matrix(
-          pathway_file,
+          pathway_file_heat,
           sp$pathway_id,
           sp$pathway_desc,
           study_ids,
           study_labels,
           d$combined,
-          hide_empty_comparisons = isTRUE(oi$hide_empty_pathway_comparisons)
+          hide_empty_comparisons = isTRUE(oi$hide_empty_pathway_comparisons),
+          term2gene_df = term2gene_custom
         )
         if (!is.null(pm$error)) {
           return(list(plot = .ora_msg_plot(pm$error), mode = "none", n_rows = 0L, n_cols = 0L, mat = NULL))
@@ -1114,7 +1374,13 @@ oraTabServer <- function(id, study_ids, study_labels, ora_input, on_gene_select 
       if (!is.null(d$error)) {
         return(list(plot = .ora_msg_plot(d$error), mode = "none", n_rows = 0L, n_cols = 0L, mat = NULL))
       }
-      cm <- ora_build_comparison_mode_matrix(pathway_file, sp$study_id, sp$comparison, d$combined)
+      cm <- ora_build_comparison_mode_matrix(
+        pathway_file_heat,
+        sp$study_id,
+        sp$comparison,
+        d$combined,
+        term2gene_df = term2gene_custom
+      )
       if (!is.null(cm$error)) {
         return(list(plot = .ora_msg_plot(cm$error), mode = "none", n_rows = 0L, n_cols = 0L, mat = NULL))
       }
@@ -1184,5 +1450,23 @@ oraTabServer <- function(id, study_ids, study_labels, ora_input, on_gene_select 
         on_gene_select(as.character(gene_symbol))
       }
     })
+
+    shiny::observeEvent(copy_genes_trigger(), {
+      st <- ora_heatmap_state()
+      if (is.null(st$mat) || !is.matrix(st$mat)) {
+        shiny::showNotification("Generate ORA heatmap first, then copy genes.", type = "warning")
+        return()
+      }
+      genes <- if (identical(st$mode, "pathway")) rownames(st$mat) else if (identical(st$mode, "comparison")) colnames(st$mat) else character(0)
+      genes <- unique(trimws(as.character(genes)))
+      genes <- genes[!is.na(genes) & nzchar(genes)]
+      if (length(genes) < 1L) {
+        shiny::showNotification("No visible genes available to copy.", type = "warning")
+        return()
+      }
+      txt <- paste(genes, collapse = "\n")
+      session$sendCustomMessage("exprs_copy_text", txt)
+      shiny::showNotification(paste0("Copied ", length(genes), " gene names."), type = "message")
+    }, ignoreInit = TRUE)
   })
 }

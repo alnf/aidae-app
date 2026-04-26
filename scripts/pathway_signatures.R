@@ -90,6 +90,104 @@ list_ora_pathway_files <- function(study_ids = character(0), dir = "databases/pa
   list_pathway_txt_files(dir = dir)
 }
 
+#' Custom ontology from Excel (long format), unlike Enrichr `.txt` files (one pathway per line).
+#'
+#' **Input:** column 1 = gene symbol, column 2 = category (pathway). Headers `symbol`/`category`
+#' preferred (`gene`/`pathway` allowed); otherwise the first two columns are used.
+#'
+#' **Logic:** trim both columns. Categories are taken **as the user typed them** (after trimming);
+#' level order follows **first occurrence** in the sheet. For each category, the gene set is the
+#' union of all symbols in rows with that category. **Gene symbols are uppercased on read** so
+#' overlap with DEG tables is case-insensitive regardless of how the user typed symbols.
+#'
+#' The result is a `TERM2GENE` table (`term`, `gene` rows) suitable for `clusterProfiler::enricher`,
+#' same as built from `.txt`, but built explicitly from per-row symbol–category assignments.
+#'
+#' @return `list(ok = logical, error = character(1) or NULL, t2g = data.frame(term, gene) or NULL)`
+parse_ontology_xlsx_for_ora <- function(path) {
+  if (is.null(path) || !nzchar(as.character(path)) || !file.exists(as.character(path))) {
+    return(list(ok = FALSE, error = "File not found.", t2g = NULL))
+  }
+  if (!requireNamespace("readxl", quietly = TRUE)) {
+    return(list(
+      ok = FALSE,
+      error = "Install readxl: install.packages(\"readxl\")",
+      t2g = NULL
+    ))
+  }
+  raw <- tryCatch(readxl::read_xlsx(path), error = function(e) NULL)
+  if (is.null(raw) || nrow(raw) < 1L) {
+    return(list(ok = FALSE, error = "Empty or unreadable .xlsx.", t2g = NULL))
+  }
+  if (ncol(raw) < 2L) {
+    return(list(ok = FALSE, error = "Need at least two columns (symbol, category).", t2g = NULL))
+  }
+  nm <- tolower(trimws(as.character(names(raw))))
+  has_sym_name <- any(nm %in% c("symbol", "gene"))
+  has_cat_name <- any(nm %in% c("category", "pathway"))
+  sym_idx <- if (any(nm == "symbol")) which(nm == "symbol")[[1L]] else if (any(nm == "gene")) which(nm == "gene")[[1L]] else 1L
+  cat_idx <- if (any(nm == "category")) which(nm == "category")[[1L]] else if (any(nm == "pathway")) which(nm == "pathway")[[1L]] else 2L
+  if (sym_idx > ncol(raw) || cat_idx > ncol(raw) || sym_idx == cat_idx) {
+    sym_idx <- 1L
+    cat_idx <- 2L
+  }
+  syms <- as.character(raw[[sym_idx]])
+  cats <- as.character(raw[[cat_idx]])
+  # Normalise hidden whitespace copied from Excel/web tables.
+  syms <- gsub("\u00A0", " ", syms, fixed = TRUE)
+  syms <- gsub("\u200B", "", syms, fixed = TRUE)
+  cats <- gsub("\u00A0", " ", cats, fixed = TRUE)
+  cats <- gsub("\u200B", "", cats, fixed = TRUE)
+  syms <- trimws(syms)
+  cats <- trimws(cats)
+
+  swapped_by_heuristic <- FALSE
+  if (!has_sym_name && !has_cat_name) {
+    # Heuristic for unnamed columns: gene symbols are usually more symbol-like and more unique.
+    score_symbol_like <- function(v) {
+      v <- trimws(as.character(v))
+      v <- v[!is.na(v) & nzchar(v)]
+      if (length(v) < 1L) return(0)
+      mean(grepl("^[A-Za-z0-9._-]+$", v) & nchar(v) <= 30)
+    }
+    s1 <- score_symbol_like(syms)
+    s2 <- score_symbol_like(cats)
+    u1 <- length(unique(syms[!is.na(syms) & nzchar(syms)]))
+    u2 <- length(unique(cats[!is.na(cats) & nzchar(cats)]))
+    if ((s2 > s1 + 0.18 && u2 > u1) || (u1 <= 3L && u2 > u1)) {
+      tmp <- syms
+      syms <- cats
+      cats <- tmp
+      swapped_by_heuristic <- TRUE
+    }
+  }
+
+  ok_row <- !is.na(syms) & nzchar(syms) & !is.na(cats) & nzchar(cats)
+  syms <- syms[ok_row]
+  cats <- cats[ok_row]
+  if (length(syms) < 1L) {
+    return(list(ok = FALSE, error = "No valid symbol/category rows.", t2g = NULL, swapped = swapped_by_heuristic))
+  }
+  gene <- toupper(syms)
+  # Remove any remaining whitespace in symbols (gene symbols should not contain spaces).
+  gene <- gsub("\\s+", "", gene, perl = TRUE)
+  ok_g <- nzchar(gene)
+  gene <- gene[ok_g]
+  cats <- cats[ok_g]
+  if (length(gene) < 1L) {
+    return(list(ok = FALSE, error = "No valid gene symbols after normalisation.", t2g = NULL, swapped = swapped_by_heuristic))
+  }
+  # Categories as provided (trimmed only); first-occurrence order via factor then character.
+  term <- as.character(factor(cats, levels = unique(cats)))
+  t2g <- data.frame(term = term, gene = gene, stringsAsFactors = FALSE)
+  t2g <- t2g[!duplicated(paste(t2g$term, t2g$gene, sep = "\t")), , drop = FALSE]
+  rownames(t2g) <- NULL
+  if (nrow(t2g) < 1L) {
+    return(list(ok = FALSE, error = "No gene–category pairs after cleaning.", t2g = NULL, swapped = swapped_by_heuristic))
+  }
+  list(ok = TRUE, error = NULL, t2g = t2g, swapped = swapped_by_heuristic)
+}
+
 #' Read a pathway file into a long data.frame with columns term, gene.
 #'
 #' Lines: tab-separated; first field = pathway name; remaining non-empty fields = gene symbols

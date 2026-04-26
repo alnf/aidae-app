@@ -262,9 +262,49 @@ ui <- secure_app(dashboardPage(
     ),
     shiny::conditionalPanel(
       condition = "input.navtabs == 'ora'",
+      shiny::tags$div(
+        style = "font-size: 0.88rem; margin-bottom: 6px;",
+        shiny::tags$strong("Custom ontology (on-the-fly ORA)")
+      ),
+      shiny::fileInput(
+        "ora_custom_ontology_xlsx",
+        label = shiny::tags$span("Excel: symbol + category", style = "font-weight: normal;"),
+        buttonLabel = "Choose .xlsx…",
+        accept = c(".xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        width = "100%"
+      ),
+      shiny::tags$div(style = "margin-top: 2px;"),
+      shiny::actionButton(
+        "ora_load_custom_ontology",
+        "Load custom ontology",
+        class = "btn-sm btn-primary"
+      ),
+      shiny::tags$div(style = "height: 4px;"),
+      shiny::actionButton(
+        "ora_clear_custom_ontology",
+        "Clear custom",
+        class = "btn-sm btn-default"
+      ),
+      shiny::tags$div(
+        class = "text-muted",
+        style = "font-size: 0.78rem; margin: 6px 0 10px 0;",
+        "Long format: col 1 = symbol, col 2 = category (one gene per row; gene sets = all rows per category). ",
+        "Unlike dropdown ",
+        shiny::tags$code(".txt"),
+        " files (one pathway per line). Gene symbols are uppercased on load so matching is case-insensitive. Requires ",
+        shiny::tags$code("readxl"),
+        "."
+      ),
+      shiny::tags$hr(),
       numericInput("ora_min_overlap", label = "Minimum pathway size (minGSSize):", value = 10L, min = 1L, step = 1L),
       numericInput("ora_min_count", label = "Minimum overlap (Count):", value = 5L, min = 1L, step = 1L),
       numericInput("ora_min_gene_ratio", label = "Minimum gene ratio:", value = 0.1, min = 0, max = 1, step = 0.01),
+      selectInput(
+        "ora_fdr_cutoff",
+        label = "Maximum adjusted p-value (FDR):",
+        choices = c("0.01" = 0.01, "0.05" = 0.05, "0.1" = 0.1, "1" = 1),
+        selected = 1
+      ),
       numericInput("ora_show_category", label = "Max pathways to show:", value = 20L, min = 1L, step = 1L),
       radioButtons(
         "ora_heatmap_click_target",
@@ -280,6 +320,7 @@ ui <- secure_app(dashboardPage(
           value = TRUE
         )
       ),
+      actionButton("ora_copy_visible_genes", label = "Copy gene symbols"),
       tags$div(
         class = "text-muted",
         style = "padding: 8px 0; font-size: 0.9rem;",
@@ -313,11 +354,54 @@ server <- function(input, output, session) {
     external_symbol = shiny::reactive(gene_jump_symbol())
   )
 
+  ora_custom_ontology <- shiny::reactiveVal(list(active = FALSE, t2g = NULL))
+
+  shiny::observeEvent(input$ora_load_custom_ontology, {
+    shiny::req(input$ora_custom_ontology_xlsx)
+    pr <- parse_ontology_xlsx_for_ora(input$ora_custom_ontology_xlsx$datapath)
+    if (!isTRUE(pr$ok)) {
+      shiny::showNotification(
+        if (!is.null(pr$error) && nzchar(as.character(pr$error))) pr$error else "Failed to read custom ontology.",
+        type = "error"
+      )
+      return()
+    }
+    ora_custom_ontology(list(active = TRUE, t2g = pr$t2g))
+    shiny::updateSelectInput(session, "ora-pathway_file", choices = c(" " = ""), selected = "")
+    n_cat <- length(unique(pr$t2g$term))
+    message(
+      "[ORA debug] custom ontology loaded from ",
+      as.character(input$ora_custom_ontology_xlsx$name),
+      " categories=", n_cat,
+      " pairs=", nrow(pr$t2g),
+      " unique_genes=", length(unique(as.character(pr$t2g$gene))),
+      if (isTRUE(pr$swapped)) " swapped_columns=TRUE" else " swapped_columns=FALSE"
+    )
+    msg <- paste0("Custom ontology loaded: ", n_cat, " categories, ", nrow(pr$t2g), " gene–category pairs.")
+    if (isTRUE(pr$swapped)) {
+      msg <- paste0(msg, " (Detected unnamed columns looked swapped; used column 2 as symbols, column 1 as categories.)")
+    }
+    shiny::showNotification(msg, type = "message", duration = 10)
+  }, ignoreInit = TRUE)
+
+  shiny::observeEvent(input$ora_clear_custom_ontology, {
+    if (is.null(input$ora_clear_custom_ontology) || input$ora_clear_custom_ontology < 1) return()
+    message("[ORA debug] clear custom ontology clicked: n=", input$ora_clear_custom_ontology)
+    ora_custom_ontology(list(active = FALSE, t2g = NULL))
+    ch <- ora_file_choices
+    if (!("" %in% unname(ch))) {
+      ch <- c("Select a pathway database..." = "", ch)
+    }
+    shiny::updateSelectInput(session, "ora-pathway_file", choices = ch, selected = "")
+    shiny::showNotification("Custom ontology cleared.", type = "message")
+  }, ignoreInit = TRUE)
+
   rv <- reactiveValues(
     current_res = NULL,
     current_mm = NULL,
     current_col_annot = NULL,
     row_index = NULL,
+    res_table_row_index = integer(0),
     selected_rows = NULL,
     custom_genes = NULL,
     custom_genes_study = NULL,
@@ -357,6 +441,9 @@ server <- function(input, output, session) {
     mgr <- if (is.null(input$ora_min_gene_ratio)) 0.1 else as.numeric(input$ora_min_gene_ratio)
     if (is.na(mgr) || mgr < 0) mgr <- 0
     if (mgr > 1) mgr <- 1
+    fdr_cut <- if (is.null(input$ora_fdr_cutoff)) 1 else as.numeric(input$ora_fdr_cutoff)
+    if (is.na(fdr_cut) || fdr_cut <= 0) fdr_cut <- 1
+    if (fdr_cut > 1) fdr_cut <- 1
     sc <- if (is.null(input$ora_show_category)) 20L else input$ora_show_category
     click_target <- if (is.null(input$ora_heatmap_click_target)) "pathway" else as.character(input$ora_heatmap_click_target)
     if (!click_target %in% c("pathway", "comparison")) click_target <- "pathway"
@@ -365,6 +452,7 @@ server <- function(input, output, session) {
       min_overlap = mo,
       min_count = mc,
       min_gene_ratio = mgr,
+      max_p_adj = fdr_cut,
       show_category = sc,
       click_target = click_target,
       hide_empty_pathway_comparisons = hide_empty
@@ -376,6 +464,8 @@ server <- function(input, output, session) {
     study_ids,
     stats::setNames(study_labels, study_ids),
     ora_input,
+    copy_genes_trigger = shiny::reactive(input$ora_copy_visible_genes),
+    custom_ontology = shiny::reactive(ora_custom_ontology()),
     on_gene_select = function(symbol) {
       sym <- trimws(as.character(symbol))
       if (!nzchar(sym)) return(invisible(NULL))
@@ -529,11 +619,13 @@ server <- function(input, output, session) {
     tbl_cols <- intersect(tbl_cols, colnames(res))
     num_idx <- which(tbl_cols %in% c("baseMean", "log2FoldChange", "padj"))
     rows <- if (length(selected_idx) == 0L) integer(0) else selected_idx
+    rv$res_table_row_index <- rows
     output[["res_table"]] <- renderDT(
       formatRound(
         datatable(
           res[rows, tbl_cols, drop = FALSE],
           rownames = FALSE,
+          selection = list(mode = "single", target = "row"),
           options = list(
             pageLength = 20,
             lengthMenu = list(c(20, 50, 100), c("20", "50", "100"))
@@ -544,6 +636,25 @@ server <- function(input, output, session) {
       )
     )
   }
+
+  observeEvent(input$res_table_rows_selected, {
+    sel <- input$res_table_rows_selected
+    if (is.null(sel) || length(sel) < 1L) return()
+    selected_row <- as.integer(sel[[1L]])
+    idx_map <- rv$res_table_row_index
+    res <- rv$current_res
+    if (is.null(res) || length(idx_map) < selected_row) return()
+    row_idx <- idx_map[[selected_row]]
+    if (is.na(row_idx) || row_idx < 1L || row_idx > nrow(res)) return()
+    if (!("symbol" %in% colnames(res))) return()
+    sym <- trimws(as.character(res$symbol[[row_idx]]))
+    if (!nzchar(sym)) return()
+    gene_jump_symbol(NULL)
+    gene_jump_symbol(sym)
+    if (requireNamespace("shinydashboard", quietly = TRUE)) {
+      shinydashboard::updateTabItems(session, "navtabs", selected = "gene")
+    }
+  }, ignoreInit = TRUE)
 
   # Same row set as the result table (brush selection or threshold-filtered rows)
   current_res_table_row_indices <- function() {
