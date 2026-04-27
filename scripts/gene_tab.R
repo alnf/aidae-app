@@ -308,7 +308,8 @@ geneTabServer <- function(id, study_ids, study_labels, external_symbol = NULL) {
                 mm = gt$mm,
                 metadata = gt$metadata,
                 gene_symbol = sym,
-                study_title = study_labels[[study_id]]
+                study_title = study_labels[[study_id]],
+                is_count_like = isTRUE(gt$is_count_like)
               ))
             }
             gdegs <- load_gene_tab_gdegs(study_id)
@@ -331,7 +332,8 @@ geneTabServer <- function(id, study_ids, study_labels, external_symbol = NULL) {
               gene_symbol = sym,
               pval_df = pv,
               study_title = study_labels[[study_id]],
-              facet_column = fc
+              facet_column = fc,
+              is_count_like = isTRUE(gt$is_count_like)
             )
           },
           height = function() {

@@ -56,12 +56,16 @@ for (i in seq_along(study_ids)) {
   }
 }
 study_choices <- setNames(study_ids, study_labels)
-if (length(study_choices) == 0L) study_choices <- c("(no studies)" = "")
+if (length(study_choices) == 0L) {
+  study_choices <- c("(no studies)" = "")
+} else {
+  study_choices <- c("Select study..." = "", study_choices)
+}
 
  
 
-# Default study = first; default DEG list = first list of first study.
-default_study <- if (length(study_ids) > 0L) study_ids[1L] else ""
+# Default study = none selected; default DEG list empty until study is chosen.
+default_study <- ""
 first_study_lists <- study_deg_lists(default_study)
 default_deg_choices <- if (length(first_study_lists) > 0L) {
   setNames(vapply(first_study_lists, function(x) x$deg_file, character(1L)),
@@ -170,6 +174,28 @@ body <- dashboardBody(
   ")),
   tabItems(
     tabItem(
+      tabName = "info",
+      fluidRow(
+        box(
+          title = "Study overview",
+          width = 12, solidHeader = TRUE, status = "secondary",
+          uiOutput("info_study_description"),
+          tags$hr(),
+          tags$div(
+            style = "max-width: 980px; margin: 0 auto;",
+            plotOutput("info_pca_plot", height = 500, width = "100%")
+          )
+        )
+      ),
+      fluidRow(
+        box(
+          title = "Study metadata",
+          width = 12, solidHeader = TRUE, status = "secondary",
+          uiOutput("info_metadata_table_ui")
+        )
+      )
+    ),
+    tabItem(
       tabName = "degs",
       fluidRow(
         column(width = 4,
@@ -236,6 +262,7 @@ ui <- secure_app(dashboardPage(
     title = main_config$title,
     navbarMenu(
       id = "navtabs",
+      navbarTab(tabName = "info", text = "Info"),
       navbarTab(tabName = "degs", text = "DEGs"),
       navbarTab(tabName = "gene", text = "Gene"),
       navbarTab(tabName = "ora", text = "ORA")
@@ -243,10 +270,14 @@ ui <- secure_app(dashboardPage(
   ),
   sidebar = dashboardSidebar(
     minified = FALSE,
+    selectInput("study", label = "Study", choices = study_choices, selected = default_study),
+    shiny::conditionalPanel(
+      condition = "input.navtabs == 'info'",
+      uiOutput("info_color_by_ui")
+    ),
     # DEGs tab only: heatmap / table controls.
     shiny::conditionalPanel(
       condition = "input.navtabs == 'degs'",
-      selectInput("study", label = "Study", choices = study_choices, selected = default_study),
       selectInput("deg_list", label = "DEG list", choices = default_deg_choices, selected = default_deg),
       uiOutput("deg_description"),
       selectInput("fdr", label = "Cutoff for FDRs:", c("0.001" = 0.001, "0.01" = 0.01, "0.05" = 0.05, "0.1" = 0.1), selected = default_thr$fdr),
@@ -332,7 +363,7 @@ ui <- secure_app(dashboardPage(
       tags$div(
         class = "text-muted",
         style = "padding: 10px 12px; font-size: 0.9rem;",
-        "Study, DEG list, and heatmap filters apply to the DEGs tab. Choose a gene in the main panel."
+        "Choose a gene in the main panel. Study selection also controls the Info tab."
       )
     )
   ),
@@ -344,6 +375,12 @@ server <- function(input, output, session) {
   res_auth <- secure_server(
     check_credentials = check_credentials(credentials)
   )
+
+  session$onFlushed(function() {
+    if (requireNamespace("shinydashboard", quietly = TRUE)) {
+      shinydashboard::updateTabItems(session, "navtabs", selected = "info")
+    }
+  }, once = TRUE)
 
   gene_jump_symbol <- shiny::reactiveVal(NULL)
 
@@ -416,6 +453,148 @@ server <- function(input, output, session) {
       lock_gene_list = TRUE
     )
   )
+
+  info_data <- shiny::reactive({
+    if (is.null(input$study) || input$study == "") return(NULL)
+    load_gene_tab_study(input$study)
+  })
+
+  output$info_color_by_ui <- renderUI({
+    dat <- info_data()
+    if (is.null(dat) || is.null(dat$metadata) || nrow(dat$metadata) < 1L) {
+      return(
+        tags$div(
+          class = "text-muted",
+          style = "padding: 6px 0;",
+          "No metadata available for selected study."
+        )
+      )
+    }
+    meta <- dat$metadata
+    col_choices <- colnames(meta)
+    default_col <- if ("PhenoNames" %in% col_choices) "PhenoNames" else col_choices[[1L]]
+    selectInput(
+      "info_color_by",
+      "Color PCA by metadata column",
+      choices = col_choices,
+      selected = default_col
+    )
+  })
+
+  output$info_study_description <- renderUI({
+    if (is.null(input$study) || input$study == "") return(NULL)
+    cfg_path <- file.path("data", input$study, "config.yaml")
+    if (!file.exists(cfg_path)) return(tags$div(class = "text-muted", "No study config found."))
+    cfg <- yaml::read_yaml(cfg_path)
+    desc <- cfg$description
+    if (is.null(desc) || !nzchar(trimws(as.character(desc)))) {
+      return(tags$div(class = "text-muted", "No study description provided in config."))
+    }
+    tags$div(
+      style = "font-size: 0.95rem; line-height: 1.5;",
+      as.character(desc)
+    )
+  })
+
+  output$info_pca_plot <- renderPlot({
+    dat <- info_data()
+    req(dat, dat$mm, dat$metadata)
+    req(input$info_color_by)
+    mm <- dat$mm
+    meta <- dat$metadata
+    if (ncol(mm) < 2L) {
+      plot.new()
+      text(0.5, 0.5, "At least 2 samples are required for PCA.")
+      return()
+    }
+    if (!input$info_color_by %in% colnames(meta)) {
+      plot.new()
+      text(0.5, 0.5, "Selected metadata column is not available.")
+      return()
+    }
+    mm_num <- suppressWarnings(apply(mm, 2, as.numeric))
+    rownames(mm_num) <- rownames(mm)
+    finite_vals <- as.vector(mm_num)
+    finite_vals <- finite_vals[is.finite(finite_vals)]
+    if (length(finite_vals) < 1L) {
+      plot.new()
+      text(0.5, 0.5, "No numeric values available for PCA.")
+      return()
+    }
+    # Heuristic: integer-like matrix is treated as raw counts and log-transformed.
+    is_count_like <- all(abs(finite_vals - round(finite_vals)) < 1e-8)
+    mm_for_pca <- if (is_count_like) log2(mm_num + 0.5) else mm_num
+    # Remove genes with non-finite or zero variance; prcomp(scale.=TRUE) errors on constants.
+    keep_rows <- apply(mm_for_pca, 1, function(x) {
+      x <- as.numeric(x)
+      x <- x[is.finite(x)]
+      length(x) >= 2L && stats::sd(x) > 0
+    })
+    mm_for_pca <- mm_for_pca[keep_rows, , drop = FALSE]
+    if (nrow(mm_for_pca) < 2L) {
+      plot.new()
+      text(0.5, 0.5, "Not enough variable genes for PCA after filtering constant rows.")
+      return()
+    }
+    pca <- stats::prcomp(t(mm_for_pca), center = TRUE, scale. = TRUE)
+    var_expl <- (pca$sdev^2) / sum(pca$sdev^2)
+    pca_df <- data.frame(
+      SampleNumber = rownames(pca$x),
+      PC1 = pca$x[, 1],
+      PC2 = pca$x[, 2],
+      ColorBy = as.character(meta[[input$info_color_by]]),
+      stringsAsFactors = FALSE
+    )
+    pca_df$ColorBy[is.na(pca_df$ColorBy) | !nzchar(pca_df$ColorBy)] <- "(missing)"
+    study_label <- study_labels[match(input$study, study_ids)]
+    if (is.na(study_label) || !nzchar(study_label)) study_label <- input$study
+    ggplot2::ggplot(pca_df, ggplot2::aes(x = PC1, y = PC2, color = ColorBy)) +
+      ggplot2::geom_point(size = 3, alpha = 0.85) +
+      ggplot2::labs(
+        title = paste0("PCA - ", study_label),
+        x = sprintf("PC1 (%.1f%%)", 100 * var_expl[1]),
+        y = sprintf("PC2 (%.1f%%)", 100 * var_expl[2]),
+        color = input$info_color_by
+      ) +
+      ggplot2::theme_minimal(base_size = 13)
+  })
+
+  output$info_metadata_table_ui <- renderUI({
+    dat <- info_data()
+    if (is.null(dat) || is.null(dat$metadata)) {
+      return(tags$div(class = "text-muted", "Select a study to view metadata."))
+    }
+    n_cols <- ncol(dat$metadata)
+    if (isTRUE(n_cols > 8L)) {
+      return(
+        tags$div(
+          style = "overflow-x: auto;",
+          DTOutput("info_metadata_table")
+        )
+      )
+    }
+    tags$div(
+      style = "max-width: 980px; margin: 0 auto;",
+      DTOutput("info_metadata_table")
+    )
+  })
+
+  output$info_metadata_table <- renderDT({
+    dat <- info_data()
+    req(dat, dat$metadata)
+    meta <- dat$metadata
+    is_wide <- isTRUE(ncol(meta) > 8L)
+    DT::datatable(
+      meta,
+      rownames = FALSE,
+      options = list(
+        pageLength = 20,
+        lengthMenu = list(c(20, 50, 100), c("20", "50", "100")),
+        scrollX = is_wide,
+        autoWidth = TRUE
+      )
+    )
+  })
 
   shiny::observe({
     shiny::req(input$navtabs == "degs")

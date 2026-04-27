@@ -303,7 +303,23 @@ load_gene_tab_study <- function(study_id) {
   metadata <- meta[idx, , drop = FALSE]
   rownames(metadata) <- NULL
 
-  out <- list(mm = mm, metadata = metadata, study_id = study_id, cfg = cfg)
+  mm_num <- suppressWarnings(apply(mm, 2, as.numeric))
+  if (is.null(dim(mm_num))) {
+    mm_num <- matrix(mm_num, ncol = 1L)
+    rownames(mm_num) <- rownames(mm)
+    colnames(mm_num) <- colnames(mm)
+  }
+  finite_vals <- as.vector(mm_num)
+  finite_vals <- finite_vals[is.finite(finite_vals)]
+  is_count_like <- length(finite_vals) > 0L && all(abs(finite_vals - round(finite_vals)) < 1e-8)
+
+  out <- list(
+    mm = mm,
+    metadata = metadata,
+    study_id = study_id,
+    cfg = cfg,
+    is_count_like = is_count_like
+  )
   assign(cache_key, out, envir = .gene_tab_cache)
   out
 }

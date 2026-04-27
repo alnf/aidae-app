@@ -29,7 +29,7 @@
     regions <- unique(as.character(df_counts[[facet_column]][!is.na(df_counts[[facet_column]])]))
     for (r in regions) {
       sub_r <- as.character(df_counts[[facet_column]]) == r
-      maxy <- max(df_counts$Counts[sub_r], na.rm = TRUE)
+      maxy <- max(df_counts$Expression[sub_r], na.rm = TRUE)
       y0 <- maxy + pad
       for (cmp in comps_order) {
         w <- which(as.character(pv[[facet_column]]) == r & as.character(pv$comp) == cmp)
@@ -39,7 +39,7 @@
       }
     }
   } else {
-    maxy <- max(df_counts$Counts, na.rm = TRUE)
+    maxy <- max(df_counts$Expression, na.rm = TRUE)
     y0 <- maxy + pad
     for (cmp in comps_order) {
       w <- which(as.character(pv$comp) == cmp)
@@ -61,6 +61,7 @@
 #' @param pval_df Slice of global DEGs for this gene (same columns as `gdegs_long.tsv`), or NULL.
 #' @param study_title Optional study label for the title.
 #' @param mcols Named vector of colours for `PhenoNames` levels; if NULL, uses [pheno_colors()].
+#' @param is_count_like Logical flag; if TRUE, applies log2(x + 0.5) before plotting.
 plot_gene_study <- function(
     ens_gene,
     mm,
@@ -69,7 +70,8 @@ plot_gene_study <- function(
     pval_df = NULL,
     study_title = NULL,
     mcols = NULL,
-    facet_column = NULL) {
+    facet_column = NULL,
+    is_count_like = FALSE) {
   if (!requireNamespace("ggplot2", quietly = TRUE)) {
     return(.gene_plot_empty("ggplot2 is required."))
   }
@@ -104,10 +106,11 @@ plot_gene_study <- function(
   }
 
   counts <- as.numeric(mm[ens_gene, , drop = TRUE])
+  expr_vals <- if (isTRUE(is_count_like)) log2(counts + 0.5) else counts
   df <- data.frame(
     SampleNumber = colnames(mm),
     PhenoNames = metadata$PhenoNames,
-    Counts = counts,
+    Expression = expr_vals,
     stringsAsFactors = FALSE
   )
   if (!is.null(fc)) {
@@ -141,13 +144,14 @@ plot_gene_study <- function(
   p <- ggpubr::ggboxplot(
     df,
     x = "PhenoNames",
-    y = "Counts",
+    y = "Expression",
     color = "PhenoNames",
     add = "jitter",
     title = ttl,
     ggtheme = ggplot2::theme_gray()
   ) +
     ggplot2::scale_color_manual(values = mcols, drop = FALSE) +
+    ggplot2::ylab(if (isTRUE(is_count_like)) "log2(expression + 0.5)" else "Expression") +
     ggplot2::scale_y_continuous(expand = ggplot2::expansion(mult = c(0.08, 0.18))) +
     ggplot2::theme(
       plot.title = ggplot2::element_text(size = 15, face = "bold"),
