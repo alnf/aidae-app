@@ -183,7 +183,7 @@ body <- dashboardBody(
           tags$hr(),
           tags$div(
             style = "max-width: 980px; margin: 0 auto;",
-            plotOutput("info_pca_plot", height = 500, width = "100%")
+            uiOutput("info_pca_ui")
           )
         )
       ),
@@ -496,30 +496,31 @@ server <- function(input, output, session) {
     )
   })
 
-  output$info_pca_plot <- renderPlot({
+  output$info_pca_ui <- renderUI({
+    if (requireNamespace("ggiraph", quietly = TRUE)) {
+      return(ggiraph::girafeOutput("info_pca_girafe", width = "100%", height = "500px"))
+    }
+    plotOutput("info_pca_plot", height = 500, width = "100%")
+  })
+
+  info_pca_data <- shiny::reactive({
     dat <- info_data()
-    req(dat, dat$mm, dat$metadata)
-    req(input$info_color_by)
+    shiny::req(dat, dat$mm, dat$metadata)
+    shiny::req(input$info_color_by)
     mm <- dat$mm
     meta <- dat$metadata
     if (ncol(mm) < 2L) {
-      plot.new()
-      text(0.5, 0.5, "At least 2 samples are required for PCA.")
-      return()
+      return(list(ok = FALSE, msg = "At least 2 samples are required for PCA."))
     }
     if (!input$info_color_by %in% colnames(meta)) {
-      plot.new()
-      text(0.5, 0.5, "Selected metadata column is not available.")
-      return()
+      return(list(ok = FALSE, msg = "Selected metadata column is not available."))
     }
     mm_num <- suppressWarnings(apply(mm, 2, as.numeric))
     rownames(mm_num) <- rownames(mm)
     finite_vals <- as.vector(mm_num)
     finite_vals <- finite_vals[is.finite(finite_vals)]
     if (length(finite_vals) < 1L) {
-      plot.new()
-      text(0.5, 0.5, "No numeric values available for PCA.")
-      return()
+      return(list(ok = FALSE, msg = "No numeric values available for PCA."))
     }
     # Heuristic: integer-like matrix is treated as raw counts and log-transformed.
     is_count_like <- all(abs(finite_vals - round(finite_vals)) < 1e-8)
@@ -532,9 +533,7 @@ server <- function(input, output, session) {
     })
     mm_for_pca <- mm_for_pca[keep_rows, , drop = FALSE]
     if (nrow(mm_for_pca) < 2L) {
-      plot.new()
-      text(0.5, 0.5, "Not enough variable genes for PCA after filtering constant rows.")
-      return()
+      return(list(ok = FALSE, msg = "Not enough variable genes for PCA after filtering constant rows."))
     }
     pca <- stats::prcomp(t(mm_for_pca), center = TRUE, scale. = TRUE)
     var_expl <- (pca$sdev^2) / sum(pca$sdev^2)
@@ -548,16 +547,67 @@ server <- function(input, output, session) {
     pca_df$ColorBy[is.na(pca_df$ColorBy) | !nzchar(pca_df$ColorBy)] <- "(missing)"
     study_label <- study_labels[match(input$study, study_ids)]
     if (is.na(study_label) || !nzchar(study_label)) study_label <- input$study
-    ggplot2::ggplot(pca_df, ggplot2::aes(x = PC1, y = PC2, color = ColorBy)) +
+    list(
+      ok = TRUE,
+      pca_df = pca_df,
+      study_label = study_label,
+      var_expl = var_expl
+    )
+  })
+
+  info_pca_base_plot <- shiny::reactive({
+    pd <- info_pca_data()
+    if (!isTRUE(pd$ok)) {
+      return(
+        ggplot2::ggplot() +
+          ggplot2::annotate("text", x = 0, y = 0, label = pd$msg, size = 4.2) +
+          ggplot2::theme_void() +
+          ggplot2::coord_cartesian(xlim = c(-1, 1), ylim = c(-1, 1))
+      )
+    }
+    ggplot2::ggplot(pd$pca_df, ggplot2::aes(x = PC1, y = PC2, color = ColorBy)) +
       ggplot2::geom_point(size = 3, alpha = 0.85) +
       ggplot2::labs(
-        title = paste0("PCA - ", study_label),
-        x = sprintf("PC1 (%.1f%%)", 100 * var_expl[1]),
-        y = sprintf("PC2 (%.1f%%)", 100 * var_expl[2]),
+        title = paste0("PCA - ", pd$study_label),
+        x = sprintf("PC1 (%.1f%%)", 100 * pd$var_expl[1]),
+        y = sprintf("PC2 (%.1f%%)", 100 * pd$var_expl[2]),
         color = input$info_color_by
       ) +
       ggplot2::theme_minimal(base_size = 13)
   })
+
+  output$info_pca_plot <- renderPlot({
+    info_pca_base_plot()
+  })
+
+  if (requireNamespace("ggiraph", quietly = TRUE)) {
+    output$info_pca_girafe <- ggiraph::renderGirafe({
+      pd <- info_pca_data()
+      if (!isTRUE(pd$ok)) {
+        return(ggiraph::girafe(ggobj = info_pca_base_plot()))
+      }
+      p <- ggplot2::ggplot(pd$pca_df, ggplot2::aes(x = PC1, y = PC2, color = ColorBy)) +
+        ggiraph::geom_point_interactive(
+          ggplot2::aes(
+            tooltip = paste0("Sample: ", SampleNumber, "\n", input$info_color_by, ": ", ColorBy),
+            data_id = SampleNumber
+          ),
+          size = 3, alpha = 0.85
+        ) +
+        ggplot2::labs(
+          title = paste0("PCA - ", pd$study_label),
+          x = sprintf("PC1 (%.1f%%)", 100 * pd$var_expl[1]),
+          y = sprintf("PC2 (%.1f%%)", 100 * pd$var_expl[2]),
+          color = input$info_color_by
+        ) +
+        ggplot2::theme_minimal(base_size = 13)
+      ggiraph::girafe(
+        ggobj = p,
+        width_svg = 10,
+        height_svg = 5
+      )
+    })
+  }
 
   output$info_metadata_table_ui <- renderUI({
     dat <- info_data()
