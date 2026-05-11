@@ -533,6 +533,29 @@ ora_parse_gene_set <- function(x) {
   unique(parts[!is.na(parts) & nzchar(parts)])
 }
 
+#' Build a minimal term–gene table from ORA `long_df` rows (e.g. precomputed RDS)
+#' when `databases/pathways/<pathway_file>` is absent (thin Connect deploy).
+ora_t2g_from_ora_subframe <- function(sub) {
+  if (is.null(sub) || !is.data.frame(sub) || nrow(sub) < 1L) {
+    return(NULL)
+  }
+  if (!"geneID" %in% colnames(sub) || !"ID" %in% colnames(sub)) {
+    return(NULL)
+  }
+  ids <- as.character(sub$ID)
+  genes_split <- lapply(seq_len(nrow(sub)), function(i) ora_parse_gene_set(sub$geneID[i]))
+  if (all(lengths(genes_split) == 0L)) {
+    return(NULL)
+  }
+  term <- rep(ids, lengths(genes_split))
+  gene <- unlist(genes_split, use.names = FALSE)
+  data.frame(
+    term = term,
+    gene = toupper(trimws(as.character(gene))),
+    stringsAsFactors = FALSE
+  )
+}
+
 ora_extract_p_adj <- function(df) {
   if (is.null(df) || !is.data.frame(df) || nrow(df) < 1L) return(rep(NA_real_, 0L))
   if ("p_adj" %in% colnames(df)) return(as.numeric(df$p_adj))
@@ -635,7 +658,12 @@ ora_term_genes <- function(pathway_file, pathway_id, pathway_desc, term2gene_df 
   t2g <- if (!is.null(term2gene_df) && is.data.frame(term2gene_df) && nrow(term2gene_df) > 0L) {
     term2gene_df
   } else {
-    parse_pathway_file_to_term2gene(pathway_file)
+    pabs <- file.path("databases", "pathways", pathway_file)
+    if (file.exists(pabs)) {
+      parse_pathway_file_to_term2gene(pathway_file)
+    } else {
+      NULL
+    }
   }
   if (is.null(t2g) || nrow(t2g) < 1L) return(character(0))
   term <- as.character(t2g$term)
@@ -724,8 +752,19 @@ ora_build_pathway_mode_matrix <- function(
       pathway_genes <- ora_parse_gene_set(sub$geneID)
     }
   }
+  t2g_fallback <- NULL
+  if ((is.null(term2gene_df) || nrow(term2gene_df) < 1L) &&
+        !file.exists(file.path("databases", "pathways", pathway_file)) &&
+        !is.null(sub) && nrow(sub) > 0L) {
+    t2g_fallback <- ora_t2g_from_ora_subframe(sub)
+  }
+  t2g_for_terms <- if (!is.null(term2gene_df) && is.data.frame(term2gene_df) && nrow(term2gene_df) > 0L) {
+    term2gene_df
+  } else {
+    t2g_fallback
+  }
   if (length(pathway_genes) < 1L && !is.null(sub) && nrow(sub) > 0L) {
-    term_genes <- ora_term_genes(pathway_file, pathway_id, pathway_desc, term2gene_df = term2gene_df)
+    term_genes <- ora_term_genes(pathway_file, pathway_id, pathway_desc, term2gene_df = t2g_for_terms)
     if (length(term_genes) > 0L) {
       for (i in seq_len(nrow(sub))) {
         sid <- as.character(sub$study_id[i])
@@ -739,7 +778,7 @@ ora_build_pathway_mode_matrix <- function(
     }
   }
   if (length(pathway_genes) < 1L) {
-    pathway_genes <- ora_pathway_genes(pathway_file, pathway_id, pathway_desc, term2gene_df = term2gene_df)
+    pathway_genes <- ora_pathway_genes(pathway_file, pathway_id, pathway_desc, term2gene_df = t2g_for_terms)
   }
   if (length(pathway_genes) < 1L) {
     return(list(error = "No genes found for selected pathway.", mat = NULL))
@@ -858,10 +897,13 @@ ora_build_comparison_mode_matrix <- function(
   if (is.null(tab) || nrow(tab) < 1L) {
     return(list(error = "Selected comparison DEG table is empty.", mat = NULL, sig_mat = NULL, padj_mat = NULL, pval_mat = NULL))
   }
+  pathway_abs <- file.path("databases", "pathways", pathway_file)
   t2g <- if (!is.null(term2gene_df) && is.data.frame(term2gene_df) && nrow(term2gene_df) > 0L) {
     term2gene_df
-  } else {
+  } else if (file.exists(pathway_abs)) {
     parse_pathway_file_to_term2gene(pathway_file)
+  } else {
+    ora_t2g_from_ora_subframe(sub)
   }
   if (is.null(t2g) || nrow(t2g) < 1L) {
     return(list(error = "Pathway database has no term-to-gene mappings.", mat = NULL, sig_mat = NULL, padj_mat = NULL, pval_mat = NULL))

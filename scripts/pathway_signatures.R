@@ -32,6 +32,60 @@ read_pathways_list_value <- function(raw_val) {
   vals
 }
 
+config_yaml_reserved_keys <- function() {
+  c("deploy", "bundle", "extends")
+}
+
+merge_config_overlay <- function(base, overlay) {
+  if (length(base) < 1L) {
+    return(overlay)
+  }
+  out <- base
+  for (nm in names(overlay)) {
+    out[[nm]] <- overlay[[nm]]
+  }
+  out
+}
+
+#' Read layered app YAML (deploy/apps/*.yaml with `extends:`), same merge as deploy bundle.
+read_main_yaml_merged <- function(config_path, repo_root = ".") {
+  repo_root <- normalizePath(repo_root, winslash = "/", mustWork = TRUE)
+  cp <- config_path
+  if (!file.exists(cp)) {
+    alt <- normalizePath(file.path(repo_root, cp), winslash = "/", mustWork = FALSE)
+    if (file.exists(alt)) {
+      cp <- alt
+    }
+  } else {
+    cp <- normalizePath(cp, winslash = "/", mustWork = TRUE)
+  }
+  if (!file.exists(cp)) {
+    return(list())
+  }
+  raw <- yaml::read_yaml(cp)
+  if (is.null(raw) || !is.list(raw)) {
+    return(list())
+  }
+  ext <- raw$extends
+  reserved <- config_yaml_reserved_keys()
+  overlay <- raw[setdiff(names(raw), reserved)]
+  base <- if (!is.null(ext) && nzchar(trimws(as.character(ext)[[1L]]))) {
+    bp <- normalizePath(
+      file.path(repo_root, trimws(as.character(ext)[[1L]])),
+      winslash = "/",
+      mustWork = FALSE
+    )
+    if (file.exists(bp)) {
+      yaml::read_yaml(bp)
+    } else {
+      list()
+    }
+  } else {
+    list()
+  }
+  merge_config_overlay(base, overlay)
+}
+
 read_pathways_list_from_file <- function(path) {
   if (!file.exists(path)) {
     return(character(0))
@@ -66,11 +120,18 @@ resolve_main_pathways_list <- function(main_cfg) {
   vals
 }
 
-list_ora_pathway_files <- function(study_ids = character(0), dir = "databases/pathways", main_config_path = "config.yaml") {
+list_ora_pathway_files <- function(
+    study_ids = character(0),
+    dir = "databases/pathways",
+    main_config_path = "config.yaml",
+    main_cfg = NULL) {
   configured <- character(0)
-  if (file.exists(main_config_path)) {
-    main_cfg <- yaml::read_yaml(main_config_path)
-    vals <- resolve_main_pathways_list(main_cfg)
+  m <- main_cfg
+  if (is.null(m) && file.exists(main_config_path)) {
+    m <- yaml::read_yaml(main_config_path)
+  }
+  if (!is.null(m) && length(m) > 0L) {
+    vals <- resolve_main_pathways_list(m)
     if (length(vals) > 0L) {
       configured <- c(configured, vals)
     }

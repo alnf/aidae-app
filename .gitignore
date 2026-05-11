@@ -52,6 +52,7 @@ po/*~
 manifest.json
 rsconnect/
 rsconnect-python/
+deploy/.cache/
 
 # Sensitive information
 .cursor/
@@ -61,3 +62,4 @@ databases/
 rsconnect.sh
 *.code-workspace
 config.yaml
+deploy/apps/*

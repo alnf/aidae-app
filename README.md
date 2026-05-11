@@ -24,6 +24,25 @@ For the Gene tab:
 - if top-level `counts_file` exists and is valid, the app uses that single matrix for the study;
 - otherwise the app groups DEG lists by resolved count matrix and renders one plot panel per unique matrix (panel title is DEG `label` list joined with commas).
 
+## Posit Connect deploy
+
+Per-app definitions live under [`deploy/apps/`](deploy/apps/) as YAML. **Real files** such as `all.yaml`, `heart.yaml`, and `placenta.yaml` are **gitignored** because they include Posit Connect identifiers (`deploy.account`, `deploy.title`, `deploy.app_id`). In git you only have **templates**: `all.example.yaml`, `heart.example.yaml`, `placenta.example.yaml` (placeholders, safe to commit). Locally, copy a template to the real name and fill in `deploy:`:
+
+```bash
+cp deploy/apps/all.example.yaml deploy/apps/all.yaml
+# edit deploy/apps/all.yaml — set account, title, app_id from the Connect UI
+```
+
+Each file combines **runtime** keys (same idea as root `config.yaml`: `title`, `studies`, `pathways_list`, …), optional `extends: config.yaml`, a **`deploy:`** block (`account`, `title`, `app_id` for `rsconnect deploy`), and a **`bundle:`** block (omit `databases/`, `orig/`, swap redundant count TSV for sibling `.rds`/`.eds` when present, ORA validation mode).
+
+- **Build manifest and deploy:** `./deploy/deploy.sh heart` or `./deploy/deploy.sh deploy/apps/heart.yaml`. Add `--dry-run` to print bundle paths and approximate size without writing `manifest.json`. Add **`--verbose`** or **`-v`** for per-study bundle messages and `rsconnect::writeManifest(verbose = TRUE)` (dependency capture is clearer but still slow). Add **`--debug`** for a full bundle path list and `set -x` during the upload step.
+- **“All studies” wrapper:** [`rsconnect.sh`](rsconnect.sh) runs `./deploy/deploy.sh all` (expects a local **`deploy/apps/all.yaml`**, typically created from [`deploy/apps/all.example.yaml`](deploy/apps/all.example.yaml)).
+- **Runtime config on the server:** set environment variable **`EXPRS_MAIN_CONFIG`** to the path of the same YAML file **inside the deployed bundle** (for example `deploy/apps/heart.yaml`). The app falls back to `config.yaml` when unset.
+- **Thin bundles (`bundle.omit_databases: true`):** do not upload `databases/pathways/`. Use an **inline `pathways_list`** in the deploy YAML (or a repo-relative list file such as `databases/pathways_list.yaml`, which is still bundled) and **precompute** per-study ORA (`ora_file`, default `ora/enrichment.rds`) for every pathway in that list. The manifest step validates RDS coverage (`bundle.ora_validate`: `strict`, `warn`, or `skip`). **Custom ontology** (.xlsx) still runs live `enricher` and does not require pathway files on disk. If the deploy YAML uses **`extends:`**, the base file (e.g. `config.yaml`) is included in the bundle so the app can merge the same keys at runtime.
+- **Secrets:** store Connect API keys outside the repo (environment variables or `rsconnect` account configuration). If an API key was ever committed, rotate it on the server.
+
+You need the **rsconnect** R package for `deploy/write_manifest.R`. The first run may take several minutes while dependencies are captured. From the repo root, `EXPRS_DEPLOY_REPO` defaults to the current working directory.
+
 ## R package dependencies
 
 The dashboard is not shipped as a formal R package (there is no `DESCRIPTION`), so dependencies are listed here.

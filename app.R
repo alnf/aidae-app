@@ -23,10 +23,40 @@ source("scripts/ora_tab.R")
 # UI defaults align with make_heatmap() / default_heatmap_thresholds(); study+DEG list can override via config.
 default_thr <- default_heatmap_thresholds()
 
-# Main app config (title, studies list; fallback if file missing)
-main_config_path <- "config.yaml"
+# Main app config (title, studies list; fallback if file missing).
+# On Posit Connect, set EXPRS_MAIN_CONFIG to a deploy YAML (e.g. deploy/apps/heart.yaml).
+main_config_path_env <- Sys.getenv("EXPRS_MAIN_CONFIG", unset = "")
+
+# Resolve EXPRS_MAIN_CONFIG more defensively. On Posit Connect, working dirs and
+# relative paths can differ; this makes sure we still find `deploy/apps/*.yaml`.
+resolve_main_config_path <- function(p) {
+  if (is.null(p) || !nzchar(p)) return("config.yaml")
+  candidates <- unique(c(
+    p,
+    # If user gives "heart.yaml" / "heart.yml"
+    file.path("deploy", "apps", basename(p)),
+    # If user gives just "heart"
+    if (!grepl("\\.ya?ml$", p, ignore.case = TRUE)) paste0("deploy/apps/", p, ".yaml") else character(0),
+    if (!grepl("\\.ya?ml$", p, ignore.case = TRUE)) paste0("deploy/apps/", p, ".yml") else character(0)
+  ))
+  ok <- candidates[vapply(candidates, file.exists, logical(1L))]
+  if (length(ok) < 1L) "config.yaml" else ok[[1L]]
+}
+
+main_config_path <- resolve_main_config_path(main_config_path_env)
+message(
+  "[exprs-app] EXPRS_MAIN_CONFIG env=(", main_config_path_env %||% "", ") resolved=(", main_config_path, ")",
+  " exists=", file.exists(main_config_path),
+  " cwd=", getwd()
+)
+repo_root_app <- getwd()
 main_config <- if (file.exists(main_config_path)) {
-  yaml::read_yaml(main_config_path)
+  mc <- read_main_yaml_merged(main_config_path, repo_root = repo_root_app)
+  if (length(mc) < 1L) {
+    list(title = "Gene expression dashboard", studies = character(0))
+  } else {
+    mc
+  }
 } else {
   list(title = "Gene expression dashboard", studies = character(0))
 }
@@ -41,6 +71,8 @@ study_ids <- if (length(main_config$studies) > 0L) {
   keep <- vapply(data_dirs, function(d) file.exists(file.path(d, "config.yaml")), logical(1L))
   basename(data_dirs[keep])
 }
+
+message("[exprs-app] main_config title=", main_config$title %||% "", " studies=", paste(study_ids, collapse = ","))
 
 # Build study dropdown choices: value = study id (sent to server), name = display label
 # Shiny selectInput: names(choices) = label shown, values(choices) = input$study value
@@ -75,7 +107,11 @@ default_deg_choices <- if (length(first_study_lists) > 0L) {
 }
 default_deg <- if (length(first_study_lists) > 0L) first_study_lists[[1L]]$deg_file else ""
 
-pathway_txt_files <- list_ora_pathway_files(study_ids)
+pathway_txt_files <- list_ora_pathway_files(
+  study_ids,
+  main_config_path = main_config_path,
+  main_cfg = main_config
+)
 # Start empty so ORA does not load until the user picks a pathway database.
 ora_pathway_default <- ""
 ora_file_choices <- if (length(pathway_txt_files) > 0L) {
