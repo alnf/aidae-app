@@ -49,7 +49,9 @@ result_table_row_indices_for_study <- function(
     sel <- tolower(res$symbol) %in% tolower(genes_vec)
     if (!any(sel)) return(integer(0))
     res_sub <- res[sel, , drop = FALSE]
-    mm_sub <- mm[res_sub$ens_gene, , drop = FALSE]
+    gene_id_col <- if ("ens_gene" %in% colnames(res_sub)) "ens_gene" else "symbol"
+    gene_ids <- as.character(res_sub[[gene_id_col]])
+    mm_sub <- mm[gene_ids, , drop = FALSE]
     idx_sub <- filter_heatmap_row_index(res_sub, mm_sub, fdr, bmean, log2fc, sval)
     if (is.null(idx_sub) || length(idx_sub) == 0L) return(integer(0))
     return(which(sel)[idx_sub])

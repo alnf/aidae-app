@@ -77,7 +77,7 @@ parse_gene_tab_facet <- function(cfg) {
 
 #' Build a long DE table for one study (all comparisons in deg_lists).
 #'
-#' Base columns: study_id, ens_gene, symbol, padj, log2FC, group1, group2, comp, joint.
+#' Base columns: study_id, ens_gene, symbol, pvalue, padj, log2FC, group1, group2, comp, joint.
 #' If `gene_tab_facet` is set in config, one extra column with that name (values aligned with metadata / DE tables for bracket placement).
 build_gene_deg_long <- function(study_id, data_root = "data") {
   cfg <- read_study_config(study_id, data_root)
@@ -125,6 +125,7 @@ build_gene_deg_long <- function(study_id, data_root = "data") {
       study_id = rep(study_id, n),
       ens_gene = as.character(res$ens_gene),
       symbol = as.character(res$symbol),
+      pvalue = if ("pvalue" %in% colnames(res)) as.numeric(res$pvalue) else rep(NA_real_, n),
       padj = as.numeric(res$padj),
       log2FC = as.numeric(res$log2FoldChange),
       group1 = rep(group1, n),
@@ -149,6 +150,7 @@ empty_gene_deg_long <- function(facet_col = NULL) {
     study_id = character(),
     ens_gene = character(),
     symbol = character(),
+    pvalue = numeric(),
     padj = numeric(),
     log2FC = numeric(),
     group1 = character(),

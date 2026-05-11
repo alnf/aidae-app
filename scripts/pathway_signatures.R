@@ -5,17 +5,18 @@ if (!exists(".pathway_t2g_cache", inherits = FALSE)) {
   .pathway_t2g_cache <- new.env(parent = emptyenv())
 }
 
-#' List *.txt pathway files under databases/pathways (no dotfiles).
-#' Excludes editor/checkpoint artifacts (e.g. *checkpoint*.txt).
+#' List pathway files under databases/pathways (no dotfiles).
+#' Supports Enrichr-style `.txt` and classical GSEA `.gmx`.
+#' Excludes editor/checkpoint artifacts.
 list_pathway_txt_files <- function(dir = "databases/pathways") {
   if (!dir.exists(dir)) return(character(0))
-  files <- list.files(dir, pattern = "\\.txt$", full.names = FALSE)
+  files <- list.files(dir, pattern = "\\.(txt|gmx)$", full.names = FALSE, ignore.case = TRUE)
   files <- files[!grepl("^\\.", files)]
   files <- files[!grepl("checkpoint", files, ignore.case = TRUE)]
   sort(files)
 }
 
-#' ORA pathway file choices: prefer configured `pathways_list`; otherwise scan *.txt.
+#' ORA pathway file choices: prefer configured `pathways_list`; otherwise scan pathway files.
 #'
 #' `pathways_list` can be defined in root `config.yaml` and/or `data/<study_id>/config.yaml`.
 #' Values should contain pathway filenames relative to `databases/pathways/`.
@@ -190,8 +191,11 @@ parse_ontology_xlsx_for_ora <- function(path) {
 
 #' Read a pathway file into a long data.frame with columns term, gene.
 #'
-#' Lines: tab-separated; first field = pathway name; remaining non-empty fields = gene symbols
-#' (Enrichr often leaves an empty second column after the name).
+#' `.txt` format: one pathway per line; first field = pathway name; remaining non-empty
+#' fields = gene symbols (Enrichr often leaves an empty second column after the name).
+#'
+#' `.gmx` format: classical GSEA matrix where columns are pathways:
+#' row 1 = pathway names, row 2 = descriptions, rows 3+ = genes.
 parse_pathway_file_to_term2gene <- function(rel_filename) {
   full <- file.path("databases/pathways", rel_filename)
   key <- paste0("t2g|", rel_filename)
@@ -199,22 +203,55 @@ parse_pathway_file_to_term2gene <- function(rel_filename) {
     return(get(key, envir = .pathway_t2g_cache, inherits = FALSE))
   }
   if (!file.exists(full)) return(NULL)
-  lines <- readLines(full, warn = FALSE, encoding = "UTF-8")
+  ext <- tolower(tools::file_ext(rel_filename))
   term <- character(0)
   gene <- character(0)
-  for (line in lines) {
-    line <- trimws(line)
-    if (!nzchar(line)) next
-    parts <- strsplit(line, "\t", fixed = TRUE)[[1L]]
-    if (length(parts) < 2L) next
-    tn <- trimws(parts[[1L]])
-    if (!nzchar(tn)) next
-    genes <- trimws(parts[-1L])
-    genes <- genes[nzchar(genes)]
-    genes <- unique(genes)
-    if (length(genes) < 1L) next
-    term <- c(term, rep(tn, length(genes)))
-    gene <- c(gene, genes)
+  if (identical(ext, "gmx")) {
+    lines <- readLines(full, warn = FALSE, encoding = "UTF-8")
+    rows <- lapply(lines, function(line) strsplit(line, "\t", fixed = TRUE)[[1L]])
+    if (length(rows) > 0L) {
+      max_cols <- max(vapply(rows, length, integer(1L)))
+      if (max_cols > 0L) {
+        mat <- matrix("", nrow = length(rows), ncol = max_cols)
+        for (i in seq_along(rows)) {
+          vals <- rows[[i]]
+          if (length(vals) > 0L) {
+            mat[i, seq_along(vals)] <- vals
+          }
+        }
+        if (nrow(mat) >= 1L) {
+          term_names <- trimws(mat[1L, ])
+          gene_start_row <- 3L
+          if (nrow(mat) < 3L) gene_start_row <- 2L
+          for (j in seq_len(ncol(mat))) {
+            tn <- term_names[[j]]
+            if (!nzchar(tn)) next
+            genes <- trimws(mat[gene_start_row:nrow(mat), j])
+            genes <- genes[nzchar(genes)]
+            genes <- unique(genes)
+            if (length(genes) < 1L) next
+            term <- c(term, rep(tn, length(genes)))
+            gene <- c(gene, genes)
+          }
+        }
+      }
+    }
+  } else {
+    lines <- readLines(full, warn = FALSE, encoding = "UTF-8")
+    for (line in lines) {
+      line <- trimws(line)
+      if (!nzchar(line)) next
+      parts <- strsplit(line, "\t", fixed = TRUE)[[1L]]
+      if (length(parts) < 2L) next
+      tn <- trimws(parts[[1L]])
+      if (!nzchar(tn)) next
+      genes <- trimws(parts[-1L])
+      genes <- genes[nzchar(genes)]
+      genes <- unique(genes)
+      if (length(genes) < 1L) next
+      term <- c(term, rep(tn, length(genes)))
+      gene <- c(gene, genes)
+    }
   }
   if (length(term) == 0L) {
     out <- data.frame(term = character(0), gene = character(0), stringsAsFactors = FALSE)

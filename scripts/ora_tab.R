@@ -4,32 +4,209 @@
 
 # Compact dimensions for message-only ggplot.
 .ora_msg_plot_px <- function() {
-  list(width = 400L, height = 110L)
+  list(width = 380L, height = 420L)
 }
 
 .ora_msg_plot <- function(msg) {
   if (!requireNamespace("ggplot2", quietly = TRUE)) {
     return(NULL)
   }
+  msg_txt <- as.character(msg)
+  msg_wrapped <- paste(strwrap(msg_txt, width = 48), collapse = "\n")
   ggplot2::ggplot() +
-    ggplot2::annotate("text", x = 0.5, y = 0.5, label = msg, size = 3.4) +
+    ggplot2::annotate(
+      "text",
+      x = 0.01,
+      y = 0.5,
+      hjust = 0,
+      vjust = 0.5,
+      label = msg_wrapped,
+      size = 4.6
+    ) +
     ggplot2::theme_void() +
+    ggplot2::theme(
+      plot.margin = ggplot2::margin(0, 0, 0, 0)
+    ) +
     ggplot2::coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
 }
 
 # Pixel size for Shiny renderPlot: total width = sum of per-study panel widths (matches facet_grid space = "free_x").
-.ora_faceted_plot_dims <- function(comp_per_panel, max_path) {
+.ora_wrap_strip_text <- function(labels, width = 9L) {
+  labs <- as.character(labels)
+  vapply(labs, function(lbl) {
+    parts <- strwrap(lbl, width = max(8L, as.integer(width)))
+    if (length(parts) < 1L) lbl else paste(parts, collapse = "\n")
+  }, character(1L))
+}
+
+.ora_strip_text_sizes <- function(labels, base_size = 12.5, comp_per_panel = NULL) {
+  labs <- as.character(labels)
+  labs <- labs[!is.na(labs) & nzchar(labs)]
+  if (length(labs) < 1L) return(numeric(0))
+  cps <- suppressWarnings(as.integer(comp_per_panel))
+  cps <- cps[!is.na(cps) & cps >= 1L]
+  cps_default <- if (length(cps) > 0L) stats::median(cps) else 3
+  cps_by_label <- if (!is.null(names(comp_per_panel)) && length(comp_per_panel) > 0L) {
+    stats::setNames(suppressWarnings(as.integer(comp_per_panel)), names(comp_per_panel))
+  } else {
+    NULL
+  }
+  out <- vapply(labs, function(lbl) {
+    chars <- nchar(lbl, type = "width")
+    n_comp <- cps_default
+    if (!is.null(cps_by_label) && lbl %in% names(cps_by_label)) {
+      n_comp <- cps_by_label[[lbl]]
+      if (is.na(n_comp) || n_comp < 1L) n_comp <- cps_default
+    }
+    # Per-facet adaptation: long labels and narrow facets get smaller text.
+    shrink_label <- max(0, chars - 14) * 0.14
+    shrink_narrow <- max(0, 3L - n_comp) * 0.45
+    max(9.2, base_size - shrink_label - shrink_narrow)
+  }, numeric(1L))
+  stats::setNames(out, labs)
+}
+
+.ora_strip_text_size <- function(labels, base_size = 12.5, comp_per_panel = NULL) {
+  sizes <- .ora_strip_text_sizes(labels, base_size = base_size, comp_per_panel = comp_per_panel)
+  if (length(sizes) < 1L) return(base_size)
+  # Robust global fallback: avoid over-shrinking all strips because of one narrow facet.
+  as.numeric(stats::quantile(sizes, probs = 0.85, na.rm = TRUE, type = 7))
+}
+
+.ora_facet_x_expand_add <- function(comp_per_panel) {
+  cps <- suppressWarnings(as.integer(comp_per_panel))
+  cps <- cps[!is.na(cps) & cps >= 1L]
+  if (length(cps) < 1L) return(0.7)
+  if (min(cps) <= 2L) return(0.95)
+  if (min(cps) == 3L) return(0.8)
+  0.65
+}
+
+.ora_add_facet_spacers <- function(plot_df, min_slots = 3L) {
+  if (is.null(plot_df) || nrow(plot_df) < 1L) return(plot_df)
+  if (!("study_label" %in% colnames(plot_df)) || !("comparison" %in% colnames(plot_df))) return(plot_df)
+  min_slots <- max(1L, as.integer(min_slots))
+  out <- plot_df
+  out$comparison <- as.character(out$comparison)
+  out$comparison_display <- out$comparison
+  out$comparison_slot <- NA_character_
+  studies <- unique(as.character(plot_df$study_label))
+  for (s in studies) {
+    idx <- which(as.character(out$study_label) == s)
+    sub <- out[idx, , drop = FALSE]
+    cmp_vals <- unique(as.character(sub$comparison))
+    n_cmp <- length(cmp_vals)
+    slots_total <- max(min_slots, n_cmp)
+    slot_keys <- paste0("..slot__", s, "__", seq_len(slots_total))
+    slot_idx <- if (n_cmp == 1L) {
+      # Keep a single real comparison centered in padded facets.
+      as.integer(ceiling(slots_total / 2))
+    } else {
+      # Spread real comparisons across available slots (e.g., 2 in 3 -> slots 1 and 3).
+      as.integer(round(seq(1, slots_total, length.out = n_cmp)))
+    }
+    cmp_to_slot <- stats::setNames(slot_keys[slot_idx], cmp_vals)
+    out$comparison_slot[idx] <- unname(cmp_to_slot[as.character(out$comparison[idx])])
+    n_add <- slots_total - n_cmp
+    if (n_add < 1L) next
+    # One y-level anchor keeps spacers in the facet x scale while producing no visible points.
+    y_anchor <- as.character(sub$Description[[1L]])
+    if (!nzchar(y_anchor)) y_anchor <- as.character(sub$Description[which(nzchar(as.character(sub$Description)))[1L]])
+    if (!nzchar(y_anchor)) next
+    spacer_slots <- setdiff(slot_keys, unname(cmp_to_slot))
+    for (k in seq_len(length(spacer_slots))) {
+      r <- sub[1L, , drop = FALSE]
+      r$comparison <- as.character(sub$comparison[[1L]])
+      r$comparison_display <- ""
+      r$comparison_slot <- spacer_slots[[k]]
+      r$Description <- y_anchor
+      if ("Count" %in% colnames(r)) r$Count <- NA_real_
+      if ("gene_ratio" %in% colnames(r)) r$gene_ratio <- NA_real_
+      if ("selection_id" %in% colnames(r)) r$selection_id <- paste0("..spacer__", s, "__", k)
+      if ("tooltip" %in% colnames(r)) r$tooltip <- ""
+      out <- rbind(out, r)
+    }
+  }
+  na_slots <- is.na(out$comparison_slot) | !nzchar(as.character(out$comparison_slot))
+  if (any(na_slots)) {
+    out$comparison_slot[na_slots] <- paste0("..slot__", as.character(out$study_label[na_slots]), "__fallback")
+  }
+  out
+}
+
+# Build x-axis labels from comparison slot -> displayed label.
+.ora_comparison_axis_labels <- function(x, label_map) {
+  xx <- as.character(x)
+  out <- unname(label_map[xx])
+  out[is.na(out)] <- ""
+  out
+}
+
+.ora_assay_palette <- function(assay_types) {
+  ats <- as.character(assay_types)
+  ats <- ats[!is.na(ats) & nzchar(ats)]
+  if (length(ats) < 1L) return(character(0))
+  ats_u <- unique(ats)
+  out <- stats::setNames(rep("#D9D9D9", length(ats_u)), ats_u) # Unknown / unspecified
+  key <- toupper(gsub("[^A-Z0-9]", "", ats_u))
+  is_rna <- grepl("RNA", key)
+  is_ms <- grepl("MS", key) & !is_rna
+  out[is_ms] <- "#F4C2D7"
+  out[is_rna] <- "#BFE3FF"
+  out
+}
+
+.ora_study_assay_types <- function(study_ids, study_labels) {
+  if (length(study_ids) < 1L) return(character(0))
+  out <- character(0)
+  for (sid in study_ids) {
+    cfg_path <- file.path("data", sid, "config.yaml")
+    if (!file.exists(cfg_path)) next
+    cfg <- tryCatch(yaml::read_yaml(cfg_path), error = function(e) NULL)
+    if (is.null(cfg)) next
+    lbl <- study_labels[[sid]]
+    if (is.null(lbl) || !nzchar(as.character(lbl))) lbl <- sid
+    at <- cfg$assay_type
+    if (is.null(at) || !nzchar(as.character(at))) at <- "Unknown"
+    out[[as.character(lbl)]] <- as.character(at)
+  }
+  out
+}
+
+# Pixel size for Shiny renderPlot: total width = sum of per-study panel widths (matches facet_grid space = "free_x").
+.ora_faceted_plot_dims <- function(comp_per_panel, max_path, panel_labels = NULL) {
   np <- max(1L, as.integer(max_path))
   if (length(comp_per_panel) < 1L) {
     return(list(width = 520L, height = 340L))
   }
   w_body <- 0L
-  for (nc in comp_per_panel) {
+  for (i in seq_along(comp_per_panel)) {
+    nc <- comp_per_panel[[i]]
     nc <- max(1L, as.integer(nc))
-    w_body <- w_body + max(118L, 68L + 48L * nc)
+    # Concave non-linear growth:
+    # - noticeably wider when nc is small (1-3 comparisons)
+    # - slower growth for larger nc to avoid over-expanding dense facets
+    panel_width <- max(138L, round(84 + 106 * log1p(nc)))
+    if (!is.null(panel_labels) && length(panel_labels) >= i) {
+      lbl <- as.character(panel_labels[[i]])
+      if (!is.na(lbl) && nzchar(lbl)) {
+        # Ensure narrow facets can still host long study names in strip labels.
+        chars <- nchar(lbl, type = "width")
+        wrapped_lines <- max(1L, ceiling(chars / 9))
+        # Reserve width for long labels, but avoid exploding total plot width.
+        panel_width <- max(panel_width, 74L + 7L * min(34L, chars) + 7L * (wrapped_lines - 1L))
+      }
+    }
+    w_body <- w_body + panel_width
   }
-  w <- min(9000L, max(480L, 168L + w_body))
-  h <- min(1600L, max(340L, 128L + 24L * np))
+  # Stronger compression when many facets are present.
+  n_facets <- length(comp_per_panel)
+  compress <- if (n_facets <= 2L) 1 else max(0.64, 1 - 0.085 * (n_facets - 2L))
+  w <- min(4200L, max(420L, 130L + round(w_body * compress)))
+  # Sublinear height scaling to avoid excessive trailing whitespace for large pathway sets.
+  npf <- as.numeric(np)
+  h <- 320 + 26 * (npf^0.88) + 7 * log1p(npf)
+  h <- min(5200L, max(420L, round(h)))
   list(width = w, height = h)
 }
 
@@ -69,7 +246,7 @@
 #' Shared y (pathways) across facets; dots only where enriched. Panel width scales with
 #' number of DEG lists per study (`facet_grid(..., space = "free_x")`). Y labels once on the
 #' margin when package ggh4x is available (`facet_grid2(..., axes = "margins")`).
-.ora_faceted_comparison_plot <- function(combined_df, study_label_levels, pathway_level_order = NULL) {
+.ora_faceted_comparison_plot <- function(combined_df, study_label_levels, pathway_level_order = NULL, assay_type_by_label = NULL) {
   if (!requireNamespace("ggplot2", quietly = TRUE)) {
     return(NULL)
   }
@@ -84,7 +261,17 @@
   plot_df <- combined_df
   # Character (not one global factor) so each facet's discrete x length = that study's DEG lists only
   # (needed for facet_grid(space = "free_x") panel widths).
+  comp_per_panel <- vapply(
+    split(as.character(combined_df$comparison), as.character(combined_df$study_label)),
+    function(x) length(unique(x)),
+    integer(1L)
+  )
   plot_df$comparison <- as.character(plot_df$comparison)
+  plot_df <- .ora_add_facet_spacers(plot_df, min_slots = 3L)
+  cmp_slot_map <- stats::setNames(
+    as.character(plot_df$comparison_display),
+    as.character(plot_df$comparison_slot)
+  )
 
   if (!is.null(pathway_level_order) && length(pathway_level_order) > 0L) {
     plot_df$Description <- factor(as.character(plot_df$Description), levels = pathway_level_order)
@@ -98,10 +285,33 @@
   }
 
   facet_obj <- if (requireNamespace("ggh4x", quietly = TRUE)) {
+    strip_sizes <- .ora_strip_text_sizes(study_label_levels, base_size = 12.5, comp_per_panel = comp_per_panel)
+    assay_vals <- if (!is.null(assay_type_by_label) && length(assay_type_by_label) > 0L) {
+      unname(assay_type_by_label[study_label_levels])
+    } else {
+      rep("Unknown", length(study_label_levels))
+    }
+    assay_vals[is.na(assay_vals) | !nzchar(assay_vals)] <- "Unknown"
+    assay_cols <- .ora_assay_palette(assay_vals)
+    strip_fills <- unname(assay_cols[assay_vals])
+    strip_fills[is.na(strip_fills)] <- "#e3e3e3"
+    strip_obj <- ggh4x::strip_themed(
+      text_x = ggh4x::elem_list_text(
+        face = rep("bold", length(strip_sizes)),
+        size = as.numeric(strip_sizes),
+        lineheight = rep(0.95, length(strip_sizes))
+      ),
+      background_x = ggh4x::elem_list_rect(
+        fill = strip_fills,
+        colour = rep("grey55", length(strip_fills))
+      )
+    )
     ggh4x::facet_grid2(
       cols = ggplot2::vars(study_label),
       scales = "free_x",
       space = "free_x",
+      labeller = ggplot2::labeller(study_label = function(x) .ora_wrap_strip_text(x, width = 9L)),
+      strip = strip_obj,
       axes = "margins",
       remove_labels = "none",
       drop = FALSE
@@ -111,18 +321,24 @@
       cols = ggplot2::vars(study_label),
       scales = "free_x",
       space = "free_x",
+      labeller = ggplot2::labeller(study_label = function(x) .ora_wrap_strip_text(x, width = 9L)),
       drop = FALSE
     )
   }
+  strip_size <- .ora_strip_text_size(study_label_levels, base_size = 12.5, comp_per_panel = comp_per_panel)
+  x_expand_add <- .ora_facet_x_expand_add(comp_per_panel)
 
   ggplot2::ggplot(plot_df, ggplot2::aes(
-    x = comparison,
+    x = comparison_slot,
     y = Description,
     color = gene_ratio,
     size = Count
   )) +
     ggplot2::geom_point(na.rm = TRUE) +
-    ggplot2::scale_x_discrete(expand = ggplot2::expansion(mult = 0, add = 0.35)) +
+    ggplot2::scale_x_discrete(
+      expand = ggplot2::expansion(mult = 0, add = x_expand_add),
+      labels = function(x) .ora_comparison_axis_labels(x, cmp_slot_map)
+    ) +
     ggplot2::scale_y_discrete(drop = FALSE) +
     ggplot2::scale_color_gradient(
       name = "Gene ratio",
@@ -143,7 +359,8 @@
     ggplot2::theme(
       plot.title = ggplot2::element_text(face = "bold", size = 16),
       plot.subtitle = ggplot2::element_text(size = 12),
-      strip.text = ggplot2::element_text(face = "bold", size = 12.5),
+      strip.text = ggplot2::element_text(face = "bold", size = strip_size, lineheight = 0.95),
+      panel.spacing.x = grid::unit(12, "pt"),
       axis.title.x = ggplot2::element_text(size = 12),
       axis.text.x = ggplot2::element_text(angle = 40, hjust = 1, size = 11),
       axis.text.y = ggplot2::element_text(size = 10),
@@ -152,7 +369,7 @@
     )
 }
 
-.ora_faceted_comparison_plot_girafe <- function(combined_df, study_label_levels, pathway_level_order = NULL) {
+.ora_faceted_comparison_plot_girafe <- function(combined_df, study_label_levels, pathway_level_order = NULL, assay_type_by_label = NULL) {
   if (!requireNamespace("ggplot2", quietly = TRUE) || !requireNamespace("ggiraph", quietly = TRUE)) {
     return(NULL)
   }
@@ -160,11 +377,21 @@
     return(.ora_msg_plot("No pathways to display."))
   }
   plot_df <- combined_df
+  comp_per_panel <- vapply(
+    split(as.character(combined_df$comparison), as.character(combined_df$study_label)),
+    function(x) length(unique(x)),
+    integer(1L)
+  )
   plot_df$study_label <- factor(
     as.character(plot_df$study_label),
     levels = study_label_levels
   )
   plot_df$comparison <- as.character(plot_df$comparison)
+  plot_df <- .ora_add_facet_spacers(plot_df, min_slots = 3L)
+  cmp_slot_map <- stats::setNames(
+    as.character(plot_df$comparison_display),
+    as.character(plot_df$comparison_slot)
+  )
   if (!is.null(pathway_level_order) && length(pathway_level_order) > 0L) {
     plot_df$Description <- factor(as.character(plot_df$Description), levels = pathway_level_order)
   } else {
@@ -179,19 +406,63 @@
     as.character(plot_df$Description),
     sep = "|||"
   )
+  p_raw <- if ("pvalue" %in% colnames(plot_df)) {
+    as.numeric(plot_df$pvalue)
+  } else if ("p_value" %in% colnames(plot_df)) {
+    as.numeric(plot_df$p_value)
+  } else {
+    rep(NA_real_, nrow(plot_df))
+  }
+  p_adj <- if ("p_adj" %in% colnames(plot_df)) {
+    as.numeric(plot_df$p_adj)
+  } else if ("p.adjust" %in% colnames(plot_df)) {
+    as.numeric(plot_df[["p.adjust"]])
+  } else if ("padj" %in% colnames(plot_df)) {
+    as.numeric(plot_df$padj)
+  } else {
+    rep(NA_real_, nrow(plot_df))
+  }
+  p_raw_lbl <- ifelse(is.na(p_raw), "not available in cache", formatC(p_raw, digits = 3, format = "f"))
+  p_adj_lbl <- ifelse(is.na(p_adj), "NA", formatC(p_adj, digits = 3, format = "f"))
+
   plot_df$tooltip <- paste0(
     "<b>Study:</b> ", as.character(plot_df$study_label),
-    "<br><b>Comparison:</b> ", as.character(plot_df$comparison),
+    "<br><b>Comparison:</b> ", as.character(plot_df$comparison_display),
     "<br><b>Pathway:</b> ", as.character(plot_df$Description),
     "<br><b>Count:</b> ", as.character(plot_df$Count),
-    "<br><b>Gene ratio:</b> ", formatC(as.numeric(plot_df$gene_ratio), digits = 3, format = "f")
+    "<br><b>Gene ratio:</b> ", formatC(as.numeric(plot_df$gene_ratio), digits = 3, format = "f"),
+    "<br><b>P-value:</b> ", p_raw_lbl,
+    "<br><b>Adjusted p-value:</b> ", p_adj_lbl
   )
 
   facet_obj <- if (requireNamespace("ggh4x", quietly = TRUE)) {
+    strip_sizes <- .ora_strip_text_sizes(study_label_levels, base_size = 12.5, comp_per_panel = comp_per_panel)
+    assay_vals <- if (!is.null(assay_type_by_label) && length(assay_type_by_label) > 0L) {
+      unname(assay_type_by_label[study_label_levels])
+    } else {
+      rep("Unknown", length(study_label_levels))
+    }
+    assay_vals[is.na(assay_vals) | !nzchar(assay_vals)] <- "Unknown"
+    assay_cols <- .ora_assay_palette(assay_vals)
+    strip_fills <- unname(assay_cols[assay_vals])
+    strip_fills[is.na(strip_fills)] <- "#e3e3e3"
+    strip_obj <- ggh4x::strip_themed(
+      text_x = ggh4x::elem_list_text(
+        face = rep("bold", length(strip_sizes)),
+        size = as.numeric(strip_sizes),
+        lineheight = rep(0.95, length(strip_sizes))
+      ),
+      background_x = ggh4x::elem_list_rect(
+        fill = strip_fills,
+        colour = rep("grey55", length(strip_fills))
+      )
+    )
     ggh4x::facet_grid2(
       cols = ggplot2::vars(study_label),
       scales = "free_x",
       space = "free_x",
+      labeller = ggplot2::labeller(study_label = function(x) .ora_wrap_strip_text(x, width = 9L)),
+      strip = strip_obj,
       axes = "margins",
       remove_labels = "none",
       drop = FALSE
@@ -201,12 +472,15 @@
       cols = ggplot2::vars(study_label),
       scales = "free_x",
       space = "free_x",
+      labeller = ggplot2::labeller(study_label = function(x) .ora_wrap_strip_text(x, width = 9L)),
       drop = FALSE
     )
   }
+  strip_size <- .ora_strip_text_size(study_label_levels, base_size = 12.5, comp_per_panel = comp_per_panel)
+  x_expand_add <- .ora_facet_x_expand_add(comp_per_panel)
 
   ggplot2::ggplot(plot_df, ggplot2::aes(
-    x = comparison,
+    x = comparison_slot,
     y = Description,
     color = gene_ratio,
     size = Count
@@ -215,7 +489,10 @@
       ggplot2::aes(data_id = selection_id, tooltip = tooltip),
       na.rm = TRUE
     ) +
-    ggplot2::scale_x_discrete(expand = ggplot2::expansion(mult = 0, add = 0.35)) +
+    ggplot2::scale_x_discrete(
+      expand = ggplot2::expansion(mult = 0, add = x_expand_add),
+      labels = function(x) .ora_comparison_axis_labels(x, cmp_slot_map)
+    ) +
     ggplot2::scale_y_discrete(drop = FALSE) +
     ggplot2::scale_color_gradient(
       name = "Gene ratio",
@@ -236,7 +513,8 @@
     ggplot2::theme(
       plot.title = ggplot2::element_text(face = "bold", size = 16),
       plot.subtitle = ggplot2::element_text(size = 12),
-      strip.text = ggplot2::element_text(face = "bold", size = 12.5),
+      strip.text = ggplot2::element_text(face = "bold", size = strip_size, lineheight = 0.95),
+      panel.spacing.x = grid::unit(12, "pt"),
       axis.title.x = ggplot2::element_text(size = 12),
       axis.text.x = ggplot2::element_text(angle = 40, hjust = 1, size = 11),
       axis.text.y = ggplot2::element_text(size = 10),
@@ -253,6 +531,14 @@ ora_parse_gene_set <- function(x) {
   parts <- trimws(unlist(strsplit(vals, "/", fixed = TRUE)))
   parts <- toupper(parts)
   unique(parts[!is.na(parts) & nzchar(parts)])
+}
+
+ora_extract_p_adj <- function(df) {
+  if (is.null(df) || !is.data.frame(df) || nrow(df) < 1L) return(rep(NA_real_, 0L))
+  if ("p_adj" %in% colnames(df)) return(as.numeric(df$p_adj))
+  if ("p.adjust" %in% colnames(df)) return(as.numeric(df[["p.adjust"]]))
+  if ("padj" %in% colnames(df)) return(as.numeric(df$padj))
+  rep(NA_real_, nrow(df))
 }
 
 ora_find_deg_file_for_comparison <- function(study_id, comparison_label) {
@@ -359,6 +645,12 @@ ora_term_genes <- function(pathway_file, pathway_id, pathway_desc, term2gene_df 
 }
 
 ora_read_deg_logfc <- function(study_id, comparison_label, deg_file = NULL) {
+  .pick_num_col <- function(df, candidates) {
+    for (nm in candidates) {
+      if (nm %in% colnames(df)) return(as.numeric(df[[nm]]))
+    }
+    rep(NA_real_, nrow(df))
+  }
   gdegs <- load_gene_tab_gdegs(study_id)
   if (!is.null(gdegs) && is.data.frame(gdegs) &&
       all(c("symbol", "log2FC") %in% colnames(gdegs))) {
@@ -366,14 +658,25 @@ ora_read_deg_logfc <- function(study_id, comparison_label, deg_file = NULL) {
     if (!is.null(cmp_col)) {
       gsub <- gdegs[as.character(gdegs[[cmp_col]]) == as.character(comparison_label), , drop = FALSE]
       if (nrow(gsub) > 0L) {
+        p_raw_vec <- .pick_num_col(gsub, c("pvalue", "p_value", "p.value", "pval", "P.Value"))
+        p_adj_vec <- .pick_num_col(gsub, c("padj", "p.adjust", "p_adj", "adj_p_val", "FDR", "qvalue", "q.value", "pvalue"))
         out <- data.frame(
           symbol = toupper(trimws(as.character(gsub$symbol))),
           log2FC = as.numeric(gsub$log2FC),
+          p_value = p_raw_vec,
+          p_adj = p_adj_vec,
           stringsAsFactors = FALSE
         )
         out <- out[!is.na(out$symbol) & nzchar(out$symbol), , drop = FALSE]
         out <- out[!is.na(out$log2FC), , drop = FALSE]
-        if (nrow(out) > 0L) return(out)
+        if (nrow(out) > 0L) {
+          # gdegs_long can omit raw p-values; in that case fall back to DEG file
+          # (when available) so heatmap tooltips/markers can use p-value.
+          has_raw <- any(!is.na(as.numeric(out$p_value)))
+          if (has_raw || is.null(deg_file) || !nzchar(as.character(deg_file))) {
+            return(out)
+          }
+        }
       }
     }
   }
@@ -384,7 +687,15 @@ ora_read_deg_logfc <- function(study_id, comparison_label, deg_file = NULL) {
   if (is.null(res) || nrow(res) < 1L || !all(c("symbol", "log2FoldChange") %in% colnames(res))) {
     return(NULL)
   }
-  out <- data.frame(symbol = toupper(trimws(as.character(res$symbol))), log2FC = as.numeric(res$log2FoldChange), stringsAsFactors = FALSE)
+  p_adj_vec <- .pick_num_col(res, c("padj", "p.adjust", "p_adj", "adj_p_val", "FDR", "qvalue", "q.value", "pvalue"))
+  p_raw_vec <- .pick_num_col(res, c("pvalue", "p_value", "p.value", "pval", "P.Value"))
+  out <- data.frame(
+    symbol = toupper(trimws(as.character(res$symbol))),
+    log2FC = as.numeric(res$log2FoldChange),
+    p_value = p_raw_vec,
+    p_adj = p_adj_vec,
+    stringsAsFactors = FALSE
+  )
   out <- out[!is.na(out$symbol) & nzchar(out$symbol), , drop = FALSE]
   out <- out[!is.na(out$log2FC), , drop = FALSE]
   if (nrow(out) > 0L) out else NULL
@@ -436,6 +747,9 @@ ora_build_pathway_mode_matrix <- function(
 
   vals <- list()
   sig_vals <- list()
+  padj_vals <- list()
+  pval_vals <- list()
+  p_adj_threshold <- 0.05
   for (sid in study_ids) {
     lists <- study_deg_lists(sid)
     if (length(lists) < 1L) next
@@ -453,17 +767,30 @@ ora_build_pathway_mode_matrix <- function(
       ok <- !is.na(hit)
       x[ok] <- tab$log2FC[hit[ok]]
       vals[[col_name]] <- x
-      sig_syms <- ora_significant_symbols(sid, deg_file)
-      sig_vals[[col_name]] <- pathway_genes %in% sig_syms
+      p_adj_vec <- rep(NA_real_, length(pathway_genes))
+      p_raw_vec <- rep(NA_real_, length(pathway_genes))
+      if ("p_adj" %in% colnames(tab)) {
+        p_adj_vec[ok] <- as.numeric(tab$p_adj[hit[ok]])
+      }
+      if ("p_value" %in% colnames(tab)) {
+        p_raw_vec[ok] <- as.numeric(tab$p_value[hit[ok]])
+      }
+      padj_vals[[col_name]] <- p_adj_vec
+      pval_vals[[col_name]] <- p_raw_vec
+      sig_vals[[col_name]] <- !is.na(x) & is.finite(p_adj_vec) & (p_adj_vec < p_adj_threshold)
     }
   }
   if (length(vals) < 1L) {
-    return(list(error = "No DEG tables available for selected pathway.", mat = NULL, sig_mat = NULL))
+    return(list(error = "No DEG tables available for selected pathway.", mat = NULL, sig_mat = NULL, padj_mat = NULL, pval_mat = NULL))
   }
   mat <- do.call(cbind, vals)
   sig_mat <- do.call(cbind, sig_vals)
+  padj_mat <- do.call(cbind, padj_vals)
+  pval_mat <- do.call(cbind, pval_vals)
   rownames(mat) <- pathway_genes
   rownames(sig_mat) <- pathway_genes
+  rownames(padj_mat) <- pathway_genes
+  rownames(pval_mat) <- pathway_genes
   keep_cols <- rep(TRUE, ncol(mat))
   if (isTRUE(hide_empty_comparisons)) {
     keep_cols <- rep(FALSE, ncol(mat))
@@ -476,24 +803,30 @@ ora_build_pathway_mode_matrix <- function(
       if (sum(keep_cols) > 0L) {
         mat <- mat[, keep_cols, drop = FALSE]
         sig_mat <- sig_mat[, keep_cols, drop = FALSE]
+        padj_mat <- padj_mat[, keep_cols, drop = FALSE]
+        pval_mat <- pval_mat[, keep_cols, drop = FALSE]
         reorder_names <- keep_names[keep_names %in% colnames(mat)]
         if (length(reorder_names) > 0L) {
           mat <- mat[, reorder_names, drop = FALSE]
           sig_mat <- sig_mat[, reorder_names, drop = FALSE]
+          padj_mat <- padj_mat[, reorder_names, drop = FALSE]
+          pval_mat <- pval_mat[, reorder_names, drop = FALSE]
         }
       }
     }
   }
   if (ncol(mat) < 1L) {
-    return(list(error = "No comparisons remained after pathway-significance filter.", mat = NULL, sig_mat = NULL))
+    return(list(error = "No comparisons remained after pathway-significance filter.", mat = NULL, sig_mat = NULL, padj_mat = NULL, pval_mat = NULL))
   }
   keep_rows <- rowSums(!is.na(mat)) > 0L
   mat <- mat[keep_rows, , drop = FALSE]
   sig_mat <- sig_mat[keep_rows, , drop = FALSE]
+  padj_mat <- padj_mat[keep_rows, , drop = FALSE]
+  pval_mat <- pval_mat[keep_rows, , drop = FALSE]
   if (nrow(mat) < 1L) {
-    return(list(error = "Selected pathway genes are absent from all DEG tables.", mat = NULL, sig_mat = NULL))
+    return(list(error = "Selected pathway genes are absent from all DEG tables.", mat = NULL, sig_mat = NULL, padj_mat = NULL, pval_mat = NULL))
   }
-  list(error = NULL, mat = mat, sig_mat = sig_mat)
+  list(error = NULL, mat = mat, sig_mat = sig_mat, padj_mat = padj_mat, pval_mat = pval_mat)
 }
 
 ora_build_comparison_mode_matrix <- function(
@@ -503,7 +836,7 @@ ora_build_comparison_mode_matrix <- function(
     combined_df,
     term2gene_df = NULL) {
   if (is.null(combined_df) || nrow(combined_df) < 1L) {
-    return(list(error = "No ORA rows available for selected comparison.", mat = NULL, sig_mat = NULL))
+    return(list(error = "No ORA rows available for selected comparison.", mat = NULL, sig_mat = NULL, padj_mat = NULL, pval_mat = NULL))
   }
   sub <- combined_df[
     as.character(combined_df$study_id) == as.character(selected_sid) &
@@ -512,18 +845,18 @@ ora_build_comparison_mode_matrix <- function(
     drop = FALSE
   ]
   if (nrow(sub) < 1L) {
-    return(list(error = "Selected comparison has no pathways in current ORA view.", mat = NULL, sig_mat = NULL))
+    return(list(error = "Selected comparison has no pathways in current ORA view.", mat = NULL, sig_mat = NULL, padj_mat = NULL, pval_mat = NULL))
   }
   lists <- study_deg_lists(selected_sid)
   idx <- which(vapply(lists, function(e) {
     identical(as.character(ora_deg_entry_comparison_label(e)), as.character(selected_comparison))
   }, logical(1L)))
   if (length(idx) != 1L) {
-    return(list(error = "Could not map selected comparison to one DEG list.", mat = NULL, sig_mat = NULL))
+    return(list(error = "Could not map selected comparison to one DEG list.", mat = NULL, sig_mat = NULL, padj_mat = NULL, pval_mat = NULL))
   }
   tab <- ora_read_deg_logfc(selected_sid, selected_comparison, lists[[idx]]$deg_file)
   if (is.null(tab) || nrow(tab) < 1L) {
-    return(list(error = "Selected comparison DEG table is empty.", mat = NULL, sig_mat = NULL))
+    return(list(error = "Selected comparison DEG table is empty.", mat = NULL, sig_mat = NULL, padj_mat = NULL, pval_mat = NULL))
   }
   t2g <- if (!is.null(term2gene_df) && is.data.frame(term2gene_df) && nrow(term2gene_df) > 0L) {
     term2gene_df
@@ -531,7 +864,7 @@ ora_build_comparison_mode_matrix <- function(
     parse_pathway_file_to_term2gene(pathway_file)
   }
   if (is.null(t2g) || nrow(t2g) < 1L) {
-    return(list(error = "Pathway database has no term-to-gene mappings.", mat = NULL, sig_mat = NULL))
+    return(list(error = "Pathway database has no term-to-gene mappings.", mat = NULL, sig_mat = NULL, padj_mat = NULL, pval_mat = NULL))
   }
   pathway_ids <- unique(as.character(sub$ID))
   pathways <- unique(data.frame(
@@ -563,7 +896,7 @@ ora_build_comparison_mode_matrix <- function(
   }
   genes_union <- unique(genes_union)
   if (length(genes_union) < 1L) {
-    return(list(error = "No overlapping genes between selected pathways and DEG table.", mat = NULL, sig_mat = NULL))
+    return(list(error = "No overlapping genes between selected pathways and DEG table.", mat = NULL, sig_mat = NULL, padj_mat = NULL, pval_mat = NULL))
   }
   mat <- matrix(NA_real_, nrow = nrow(pathways), ncol = length(genes_union))
   rownames(mat) <- pathways$Description
@@ -579,27 +912,36 @@ ora_build_comparison_mode_matrix <- function(
   keep_cols <- colSums(!is.na(mat)) > 0L
   mat <- mat[, keep_cols, drop = FALSE]
   if (ncol(mat) < 1L) {
-    return(list(error = "No genes remained after overlap with selected comparison.", mat = NULL, sig_mat = NULL))
+    return(list(error = "No genes remained after overlap with selected comparison.", mat = NULL, sig_mat = NULL, padj_mat = NULL, pval_mat = NULL))
   }
-  sig_cols <- colnames(mat) %in% sig_syms
+  p_adj_threshold <- 0.05
   sig_mat <- matrix(FALSE, nrow = nrow(mat), ncol = ncol(mat))
   rownames(sig_mat) <- rownames(mat)
   colnames(sig_mat) <- colnames(mat)
-  if (any(sig_cols)) {
-    for (j in which(sig_cols)) {
-      sig_mat[, j] <- !is.na(mat[, j])
-    }
+  padj_mat <- matrix(NA_real_, nrow = nrow(mat), ncol = ncol(mat))
+  rownames(padj_mat) <- rownames(mat)
+  colnames(padj_mat) <- colnames(mat)
+  pval_mat <- matrix(NA_real_, nrow = nrow(mat), ncol = ncol(mat))
+  rownames(pval_mat) <- rownames(mat)
+  colnames(pval_mat) <- colnames(mat)
+  p_adj_by_gene <- stats::setNames(as.numeric(tab$p_adj), as.character(tab$symbol))
+  p_raw_by_gene <- if ("p_value" %in% colnames(tab)) {
+    stats::setNames(as.numeric(tab$p_value), as.character(tab$symbol))
+  } else {
+    NULL
   }
-  list(error = NULL, mat = mat, sig_mat = sig_mat)
+  for (j in seq_len(ncol(mat))) {
+    gene <- colnames(mat)[[j]]
+    pv <- suppressWarnings(as.numeric(p_adj_by_gene[[gene]]))
+    pr <- if (!is.null(p_raw_by_gene)) suppressWarnings(as.numeric(p_raw_by_gene[[gene]])) else NA_real_
+    padj_mat[, j] <- pv
+    pval_mat[, j] <- pr
+    sig_mat[, j] <- !is.na(mat[, j]) & is.finite(pv) & (pv < p_adj_threshold)
+  }
+  list(error = NULL, mat = mat, sig_mat = sig_mat, padj_mat = padj_mat, pval_mat = pval_mat)
 }
 
-ora_heatmap_plot <- function(mat, title, x_lab, y_lab, sig_mat = NULL) {
-  if (!requireNamespace("ggplot2", quietly = TRUE)) {
-    return(.ora_msg_plot("Install ggplot2 to render heatplot."))
-  }
-  if (is.null(mat) || nrow(mat) < 1L || ncol(mat) < 1L) {
-    return(.ora_msg_plot("No matrix values to display."))
-  }
+ora_heatmap_df_with_sig_padj <- function(mat, sig_mat = NULL, padj_mat = NULL, pval_mat = NULL) {
   df <- as.data.frame(as.table(mat), stringsAsFactors = FALSE)
   colnames(df) <- c("row_key", "col_key", "value")
   row_levels <- rev(rownames(mat))
@@ -615,6 +957,38 @@ ora_heatmap_plot <- function(mat, title, x_lab, y_lab, sig_mat = NULL) {
   } else {
     df$is_sig <- FALSE
   }
+  if (!is.null(padj_mat) && all(dim(padj_mat) == dim(mat))) {
+    p_df <- as.data.frame(as.table(padj_mat), stringsAsFactors = FALSE)
+    colnames(p_df) <- c("row_key", "col_key", "p_adj")
+    df <- merge(df, p_df, by = c("row_key", "col_key"), all.x = TRUE, sort = FALSE)
+    df$p_adj <- as.numeric(df$p_adj)
+  } else {
+    df$p_adj <- NA_real_
+  }
+  if (!is.null(pval_mat) && all(dim(pval_mat) == dim(mat))) {
+    p_raw_df <- as.data.frame(as.table(pval_mat), stringsAsFactors = FALSE)
+    colnames(p_raw_df) <- c("row_key", "col_key", "p_value")
+    df <- merge(df, p_raw_df, by = c("row_key", "col_key"), all.x = TRUE, sort = FALSE)
+    df$p_value <- as.numeric(df$p_value)
+  } else {
+    df$p_value <- NA_real_
+  }
+  df$marker <- ifelse(
+    df$is_sig,
+    "*",
+    ifelse(!is.na(df$p_value) & is.finite(df$p_value) & (df$p_value <= 0.05), "\u00B7", "")
+  )
+  df
+}
+
+ora_heatmap_plot <- function(mat, title, x_lab, y_lab, sig_mat = NULL, pval_mat = NULL) {
+  if (!requireNamespace("ggplot2", quietly = TRUE)) {
+    return(.ora_msg_plot("Install ggplot2 to render heatplot."))
+  }
+  if (is.null(mat) || nrow(mat) < 1L || ncol(mat) < 1L) {
+    return(.ora_msg_plot("No matrix values to display."))
+  }
+  df <- ora_heatmap_df_with_sig_padj(mat, sig_mat = sig_mat, padj_mat = NULL, pval_mat = pval_mat)
   n_rows <- nrow(mat)
   # Slightly larger labels overall; big sets remain readable with increased height scaling.
   row_text_size <- 18.2 - 2.95 * log1p(max(0, n_rows - 1L) / 24)
@@ -633,7 +1007,7 @@ ora_heatmap_plot <- function(mat, title, x_lab, y_lab, sig_mat = NULL) {
     ggplot2::labs(title = title, x = x_lab, y = y_lab) +
     ggplot2::theme_bw() +
     ggplot2::theme(
-      plot.title = ggplot2::element_text(face = "bold", size = 18),
+      plot.title = ggplot2::element_text(face = "bold", size = 14),
       axis.title.x = ggplot2::element_text(size = 14),
       axis.title.y = ggplot2::element_text(size = 14),
       axis.text.x = ggplot2::element_text(angle = 55, hjust = 1, vjust = 1, size = 11.5),
@@ -642,12 +1016,11 @@ ora_heatmap_plot <- function(mat, title, x_lab, y_lab, sig_mat = NULL) {
       legend.text = ggplot2::element_text(size = 12),
       legend.position = "right"
     )
-  sig_df <- df[df$is_sig, , drop = FALSE]
-  if (nrow(sig_df) > 0L) {
+  mark_df <- df[nzchar(as.character(df$marker)), , drop = FALSE]
+  if (nrow(mark_df) > 0L) {
     p <- p + ggplot2::geom_text(
-      data = sig_df,
-      ggplot2::aes(x = col_key, y = row_key),
-      label = "*",
+      data = mark_df,
+      ggplot2::aes(x = col_key, y = row_key, label = marker),
       size = 4.2,
       color = "black",
       inherit.aes = FALSE
@@ -656,7 +1029,67 @@ ora_heatmap_plot <- function(mat, title, x_lab, y_lab, sig_mat = NULL) {
   p
 }
 
-ora_heatmap_plot_pathway_faceted <- function(mat, title, study_label_order = NULL, sig_mat = NULL) {
+ora_heatmap_plot_girafe <- function(mat, title, x_lab, y_lab, sig_mat = NULL, padj_mat = NULL, pval_mat = NULL) {
+  if (!requireNamespace("ggplot2", quietly = TRUE) || !requireNamespace("ggiraph", quietly = TRUE)) {
+    return(NULL)
+  }
+  if (is.null(mat) || nrow(mat) < 1L || ncol(mat) < 1L) {
+    return(.ora_msg_plot("No matrix values to display."))
+  }
+  df <- ora_heatmap_df_with_sig_padj(mat, sig_mat = sig_mat, padj_mat = padj_mat, pval_mat = pval_mat)
+  p_adj_lbl <- ifelse(is.na(df$p_adj), "NA", formatC(df$p_adj, digits = 3, format = "f"))
+  logfc_lbl <- ifelse(is.na(df$value), "NA", formatC(df$value, digits = 3, format = "f"))
+  df$tooltip <- paste0(
+    "<b>Pathway:</b> ", as.character(df$row_key),
+    "<br><b>Gene:</b> ", as.character(df$col_key),
+    "<br><b>log2FC:</b> ", logfc_lbl,
+    "<br><b>P-value:</b> ", ifelse(is.na(df$p_value), "NA", formatC(df$p_value, digits = 3, format = "f")),
+    "<br><b>Adjusted p-value:</b> ", p_adj_lbl
+  )
+  df$data_id <- paste(as.character(df$row_key), as.character(df$col_key), sep = "|||")
+  n_rows <- nrow(mat)
+  row_text_size <- 18.2 - 2.95 * log1p(max(0, n_rows - 1L) / 24)
+  row_text_size <- min(18.2, max(8.6, row_text_size))
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = col_key, y = row_key, fill = value)) +
+    ggiraph::geom_tile_interactive(
+      ggplot2::aes(tooltip = tooltip, data_id = data_id),
+      color = "grey90",
+      linewidth = 0.15
+    ) +
+    ggplot2::scale_fill_gradient2(
+      low = "#2c7bb6",
+      mid = "white",
+      high = "#d7191c",
+      midpoint = 0,
+      na.value = "grey35",
+      name = "log2FC"
+    ) +
+    ggplot2::labs(title = title, x = x_lab, y = y_lab) +
+    ggplot2::theme_bw() +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold", size = 14),
+      axis.title.x = ggplot2::element_text(size = 14),
+      axis.title.y = ggplot2::element_text(size = 14),
+      axis.text.x = ggplot2::element_text(angle = 55, hjust = 1, vjust = 1, size = 11.5),
+      axis.text.y = ggplot2::element_text(size = row_text_size),
+      legend.title = ggplot2::element_text(size = 13),
+      legend.text = ggplot2::element_text(size = 12),
+      legend.position = "right"
+    )
+  mark_df <- df[nzchar(as.character(df$marker)), , drop = FALSE]
+  if (nrow(mark_df) > 0L) {
+    p <- p + ggplot2::geom_text(
+      data = mark_df,
+      ggplot2::aes(x = col_key, y = row_key, label = marker),
+      size = 4.2,
+      color = "black",
+      inherit.aes = FALSE
+    )
+  }
+  p
+}
+
+ora_heatmap_plot_pathway_faceted <- function(mat, title, study_label_order = NULL, sig_mat = NULL, pval_mat = NULL, assay_type_by_label = NULL) {
   if (!requireNamespace("ggplot2", quietly = TRUE)) {
     return(.ora_msg_plot("Install ggplot2 to render heatplot."))
   }
@@ -686,19 +1119,7 @@ ora_heatmap_plot_pathway_faceted <- function(mat, title, study_label_order = NUL
     study_label_order <- present_studies
   }
 
-  df <- as.data.frame(as.table(mat), stringsAsFactors = FALSE)
-  colnames(df) <- c("row_key", "col_key", "value")
-  row_levels <- rev(rownames(mat))
-  df$row_key <- factor(as.character(df$row_key), levels = row_levels)
-  if (!is.null(sig_mat) && all(dim(sig_mat) == dim(mat))) {
-    sig_df <- as.data.frame(as.table(sig_mat), stringsAsFactors = FALSE)
-    colnames(sig_df) <- c("row_key", "col_key", "is_sig")
-    df <- merge(df, sig_df, by = c("row_key", "col_key"), all.x = TRUE, sort = FALSE)
-    df$is_sig <- as.logical(df$is_sig)
-    df$is_sig[is.na(df$is_sig)] <- FALSE
-  } else {
-    df$is_sig <- FALSE
-  }
+  df <- ora_heatmap_df_with_sig_padj(mat, sig_mat = sig_mat, padj_mat = NULL, pval_mat = pval_mat)
   key_df <- data.frame(
     col_key = cn,
     study = study_part,
@@ -715,10 +1136,27 @@ ora_heatmap_plot_pathway_faceted <- function(mat, title, study_label_order = NUL
   row_text_size <- min(18.2, max(8.6, row_text_size))
 
   facet_obj <- if (requireNamespace("ggh4x", quietly = TRUE)) {
+    assay_vals <- if (!is.null(assay_type_by_label) && length(assay_type_by_label) > 0L) {
+      unname(assay_type_by_label[study_label_order])
+    } else {
+      rep("Unknown", length(study_label_order))
+    }
+    assay_vals[is.na(assay_vals) | !nzchar(assay_vals)] <- "Unknown"
+    assay_cols <- .ora_assay_palette(assay_vals)
+    strip_fills <- unname(assay_cols[assay_vals])
+    strip_fills[is.na(strip_fills)] <- "#e3e3e3"
+    strip_obj <- ggh4x::strip_themed(
+      background_x = ggh4x::elem_list_rect(
+        fill = strip_fills,
+        colour = rep("grey55", length(strip_fills))
+      )
+    )
     ggh4x::facet_grid2(
       cols = ggplot2::vars(study),
       scales = "free_x",
       space = "free_x",
+      labeller = ggplot2::labeller(study = function(x) .ora_wrap_strip_text(x, width = 12L)),
+      strip = strip_obj,
       axes = "margins",
       remove_labels = "none",
       drop = TRUE
@@ -728,9 +1166,11 @@ ora_heatmap_plot_pathway_faceted <- function(mat, title, study_label_order = NUL
       cols = ggplot2::vars(study),
       scales = "free_x",
       space = "free_x",
+      labeller = ggplot2::labeller(study = function(x) .ora_wrap_strip_text(x, width = 12L)),
       drop = TRUE
     )
   }
+  strip_size <- .ora_strip_text_size(levels(df$study), base_size = 12.5)
 
   p <- ggplot2::ggplot(df, ggplot2::aes(x = comparison, y = row_key, fill = value)) +
     ggplot2::geom_tile(color = "grey90", linewidth = 0.15) +
@@ -746,8 +1186,8 @@ ora_heatmap_plot_pathway_faceted <- function(mat, title, study_label_order = NUL
     ggplot2::labs(title = title, x = "Comparison (DEG list)", y = "Pathway genes") +
     ggplot2::theme_bw() +
     ggplot2::theme(
-      plot.title = ggplot2::element_text(face = "bold", size = 18),
-      strip.text = ggplot2::element_text(face = "bold", size = 12.5),
+      plot.title = ggplot2::element_text(face = "bold", size = 14),
+      strip.text = ggplot2::element_text(face = "bold", size = strip_size, lineheight = 0.95),
       axis.title.x = ggplot2::element_text(size = 14),
       axis.title.y = ggplot2::element_text(size = 14),
       axis.text.x = ggplot2::element_text(angle = 55, hjust = 1, vjust = 1, size = 11.5),
@@ -756,12 +1196,141 @@ ora_heatmap_plot_pathway_faceted <- function(mat, title, study_label_order = NUL
       legend.text = ggplot2::element_text(size = 12),
       legend.position = "right"
     )
-  sig_df <- df[df$is_sig, , drop = FALSE]
-  if (nrow(sig_df) > 0L) {
+  mark_df <- df[nzchar(as.character(df$marker)), , drop = FALSE]
+  if (nrow(mark_df) > 0L) {
     p <- p + ggplot2::geom_text(
-      data = sig_df,
-      ggplot2::aes(x = comparison, y = row_key),
-      label = "*",
+      data = mark_df,
+      ggplot2::aes(x = comparison, y = row_key, label = marker),
+      size = 4.2,
+      color = "black",
+      inherit.aes = FALSE
+    )
+  }
+  p
+}
+
+ora_heatmap_plot_pathway_faceted_girafe <- function(mat, title, study_label_order = NULL, sig_mat = NULL, padj_mat = NULL, pval_mat = NULL, assay_type_by_label = NULL) {
+  if (!requireNamespace("ggplot2", quietly = TRUE) || !requireNamespace("ggiraph", quietly = TRUE)) {
+    return(NULL)
+  }
+  if (is.null(mat) || nrow(mat) < 1L || ncol(mat) < 1L) {
+    return(.ora_msg_plot("No matrix values to display."))
+  }
+  cn <- colnames(mat)
+  study_part <- character(length(cn))
+  comp_part <- character(length(cn))
+  for (i in seq_along(cn)) {
+    nm <- as.character(cn[[i]])
+    pos <- regexpr("::", nm, fixed = TRUE)[1L]
+    if (!is.na(pos) && pos > 0L) {
+      study_part[[i]] <- substr(nm, 1L, pos - 1L)
+      comp_part[[i]] <- substr(nm, pos + 2L, nchar(nm))
+    } else {
+      study_part[[i]] <- nm
+      comp_part[[i]] <- nm
+    }
+  }
+  if (is.null(study_label_order) || length(study_label_order) < 1L) {
+    study_label_order <- unique(study_part)
+  }
+  present_studies <- unique(study_part)
+  study_label_order <- study_label_order[study_label_order %in% present_studies]
+  if (length(study_label_order) < 1L) {
+    study_label_order <- present_studies
+  }
+  df <- ora_heatmap_df_with_sig_padj(mat, sig_mat = sig_mat, padj_mat = padj_mat, pval_mat = pval_mat)
+  key_df <- data.frame(
+    col_key = cn,
+    study = study_part,
+    comparison = comp_part,
+    stringsAsFactors = FALSE
+  )
+  df <- merge(df, key_df, by = "col_key", all.x = TRUE, sort = FALSE)
+  df$study <- factor(as.character(df$study), levels = study_label_order)
+  df$comparison <- factor(as.character(df$comparison), levels = unique(comp_part))
+  p_adj_lbl <- ifelse(is.na(df$p_adj), "NA", formatC(df$p_adj, digits = 3, format = "f"))
+  logfc_lbl <- ifelse(is.na(df$value), "NA", formatC(df$value, digits = 3, format = "f"))
+  df$tooltip <- paste0(
+    "<b>Study:</b> ", as.character(df$study),
+    "<br><b>Comparison:</b> ", as.character(df$comparison),
+    "<br><b>Gene:</b> ", as.character(df$row_key),
+    "<br><b>log2FC:</b> ", logfc_lbl,
+    "<br><b>P-value:</b> ", ifelse(is.na(df$p_value), "NA", formatC(df$p_value, digits = 3, format = "f")),
+    "<br><b>Adjusted p-value:</b> ", p_adj_lbl
+  )
+  df$data_id <- paste(as.character(df$row_key), as.character(df$comparison), as.character(df$study), sep = "|||")
+  n_rows <- nrow(mat)
+  row_text_size <- 18.2 - 2.95 * log1p(max(0, n_rows - 1L) / 24)
+  row_text_size <- min(18.2, max(8.6, row_text_size))
+  facet_obj <- if (requireNamespace("ggh4x", quietly = TRUE)) {
+    assay_vals <- if (!is.null(assay_type_by_label) && length(assay_type_by_label) > 0L) {
+      unname(assay_type_by_label[study_label_order])
+    } else {
+      rep("Unknown", length(study_label_order))
+    }
+    assay_vals[is.na(assay_vals) | !nzchar(assay_vals)] <- "Unknown"
+    assay_cols <- .ora_assay_palette(assay_vals)
+    strip_fills <- unname(assay_cols[assay_vals])
+    strip_fills[is.na(strip_fills)] <- "#e3e3e3"
+    strip_obj <- ggh4x::strip_themed(
+      background_x = ggh4x::elem_list_rect(
+        fill = strip_fills,
+        colour = rep("grey55", length(strip_fills))
+      )
+    )
+    ggh4x::facet_grid2(
+      cols = ggplot2::vars(study),
+      scales = "free_x",
+      space = "free_x",
+      labeller = ggplot2::labeller(study = function(x) .ora_wrap_strip_text(x, width = 12L)),
+      strip = strip_obj,
+      axes = "margins",
+      remove_labels = "none",
+      drop = TRUE
+    )
+  } else {
+    ggplot2::facet_grid(
+      cols = ggplot2::vars(study),
+      scales = "free_x",
+      space = "free_x",
+      labeller = ggplot2::labeller(study = function(x) .ora_wrap_strip_text(x, width = 12L)),
+      drop = TRUE
+    )
+  }
+  strip_size <- .ora_strip_text_size(levels(df$study), base_size = 12.5)
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = comparison, y = row_key, fill = value)) +
+    ggiraph::geom_tile_interactive(
+      ggplot2::aes(tooltip = tooltip, data_id = data_id),
+      color = "grey90",
+      linewidth = 0.15
+    ) +
+    ggplot2::scale_fill_gradient2(
+      low = "#2c7bb6",
+      mid = "white",
+      high = "#d7191c",
+      midpoint = 0,
+      na.value = "grey35",
+      name = "log2FC"
+    ) +
+    facet_obj +
+    ggplot2::labs(title = title, x = "Comparison (DEG list)", y = "Pathway genes") +
+    ggplot2::theme_bw() +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold", size = 14),
+      strip.text = ggplot2::element_text(face = "bold", size = strip_size, lineheight = 0.95),
+      axis.title.x = ggplot2::element_text(size = 14),
+      axis.title.y = ggplot2::element_text(size = 14),
+      axis.text.x = ggplot2::element_text(angle = 55, hjust = 1, vjust = 1, size = 11.5),
+      axis.text.y = ggplot2::element_text(size = row_text_size),
+      legend.title = ggplot2::element_text(size = 13),
+      legend.text = ggplot2::element_text(size = 12),
+      legend.position = "right"
+    )
+  mark_df <- df[nzchar(as.character(df$marker)), , drop = FALSE]
+  if (nrow(mark_df) > 0L) {
+    p <- p + ggplot2::geom_text(
+      data = mark_df,
+      ggplot2::aes(x = comparison, y = row_key, label = marker),
       size = 4.2,
       color = "black",
       inherit.aes = FALSE
@@ -838,6 +1407,7 @@ oraTabUI <- function(id, study_ids, study_labels, ora_file_choices, pathway_defa
       shiny::column(
         width = 12,
         shiny::uiOutput(ns("ora_dotplot_status")),
+            shiny::uiOutput(ns("ora_assay_legend_ui")),
         shiny::tags$div(
           class = "ora-plot-wrap",
           style = "overflow-x: auto; width: 100%; max-width: 100%; min-width: 0;",
@@ -888,6 +1458,32 @@ oraTabServer <- function(
     on_gene_select = NULL,
     custom_ontology = NULL) {
   shiny::moduleServer(id, function(input, output, session) {
+    assay_type_by_label <- .ora_study_assay_types(study_ids, study_labels)
+    output$ora_assay_legend_ui <- shiny::renderUI({
+      if (length(assay_type_by_label) < 1L) return(NULL)
+      assays <- unique(as.character(assay_type_by_label))
+      assays <- assays[!is.na(assays) & nzchar(assays)]
+      if (length(assays) < 1L) return(NULL)
+      pal <- .ora_assay_palette(assays)
+      shiny::tags$div(
+        style = "display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:2px 0 10px 0;",
+        shiny::tags$span(style = "font-size:0.92rem;font-weight:600;color:#555;", "Assay type:"),
+        lapply(assays, function(a) {
+          col <- pal[[a]]
+          if (is.null(col) || !nzchar(col)) col <- "#D9D9D9"
+          shiny::tags$span(
+            style = "display:inline-flex;align-items:center;gap:6px;font-size:0.9rem;color:#333;",
+            shiny::tags$span(
+              style = paste0(
+                "display:inline-block;width:12px;height:12px;border-radius:2px;",
+                "background:", col, ";border:1px solid #8d8d8d;"
+              )
+            ),
+            as.character(a)
+          )
+        })
+      )
+    })
     .ora_debug_log <- function(...) {
       message("[ORA debug] ", paste0(..., collapse = ""))
     }
@@ -1077,6 +1673,9 @@ oraTabServer <- function(
       max_p_adj <- suppressWarnings(as.numeric(oi$max_p_adj))
       if (is.na(max_p_adj) || max_p_adj <= 0) max_p_adj <- 1
       if (max_p_adj > 1) max_p_adj <- 1
+      max_p_value <- suppressWarnings(as.numeric(oi$max_p_value))
+      if (is.na(max_p_value) || max_p_value <= 0) max_p_value <- 1
+      if (max_p_value > 1) max_p_value <- 1
       n_show <- suppressWarnings(as.integer(oi$show_category))
       if (is.na(n_show) || n_show < 1L) n_show <- 20L
       n_show <- min(100L, max(1L, n_show))
@@ -1086,7 +1685,17 @@ oraTabServer <- function(
         .ora_debug_log("ora_long_source error: ", as.character(src$error))
         return(list(error = src$error, by_study = NULL, pathway_level_order = NULL))
       }
-      ob <- ora_build_plot_payload(src$long_by_sid, study_ids, study_labels, min_ol, min_ct, min_gr, n_show, max_p_adj = max_p_adj)
+      ob <- ora_build_plot_payload(
+        src$long_by_sid,
+        study_ids,
+        study_labels,
+        min_ol,
+        min_ct,
+        min_gr,
+        n_show,
+        max_p_value = max_p_value,
+        max_p_adj = max_p_adj
+      )
       vis_summ <- character(0)
       for (sid in study_ids) {
         b <- ob$by_study[[sid]]
@@ -1097,6 +1706,7 @@ oraTabServer <- function(
         "plot payload after filters: min_count=", min_ct,
         " min_overlap=", min_ol,
         " min_gene_ratio=", format(min_gr, digits = 3),
+        " max_p=", format(max_p_value, digits = 3),
         " max_p_adj=", format(max_p_adj, digits = 3),
         " n_show=", n_show,
         " rows_by_study=", paste(vis_summ, collapse = ", ")
@@ -1185,7 +1795,18 @@ oraTabServer <- function(
           ob = ob
         ))
       }
-      combined <- do.call(rbind, dfs)
+      # Defensive bind: studies can contribute slightly different optional columns
+      # when caches were produced across app versions.
+      all_cols <- character(0)
+      for (d in dfs) all_cols <- union(all_cols, colnames(d))
+      dfs_aligned <- lapply(dfs, function(d) {
+        miss <- setdiff(all_cols, colnames(d))
+        if (length(miss) > 0L) {
+          for (nm in miss) d[[nm]] <- NA
+        }
+        d[, all_cols, drop = FALSE]
+      })
+      combined <- do.call(rbind, dfs_aligned)
       if (!is.null(ob$pathway_level_order) && length(ob$pathway_level_order) > 0L) {
         combined$Description <- factor(
           as.character(combined$Description),
@@ -1198,21 +1819,24 @@ oraTabServer <- function(
     output$ora_plot_all_ui <- shiny::renderUI({
       d <- ora_combined_plot_df()
       comp_per_panel <- integer(0)
+      panel_labels <- character(0)
       max_path <- 1L
       if (!is.null(d$combined) && nrow(d$combined) > 0L) {
         for (sid in study_ids) {
           sub <- d$combined[as.character(d$combined$study_id) == sid, , drop = FALSE]
           if (nrow(sub) < 1L) next
-          comp_per_panel <- c(comp_per_panel, length(unique(as.character(sub$comparison))))
+          comp_per_panel <- c(comp_per_panel, max(3L, length(unique(as.character(sub$comparison)))))
+          panel_labels <- c(panel_labels, unique(as.character(sub$study_label))[[1L]])
           max_path <- max(max_path, length(unique(as.character(sub$ID))))
         }
       }
       dims <- if (length(comp_per_panel) > 0L) {
-        .ora_faceted_plot_dims(comp_per_panel, max_path)
+        .ora_faceted_plot_dims(comp_per_panel, max_path, panel_labels = panel_labels)
       } else {
         .ora_msg_plot_px()
       }
-      if (requireNamespace("ggiraph", quietly = TRUE)) {
+      has_real_dotplot <- is.null(d$error) && !is.null(d$combined) && nrow(d$combined) > 0L
+      if (requireNamespace("ggiraph", quietly = TRUE) && has_real_dotplot) {
         ggiraph::girafeOutput(session$ns("ora_plot_all"), width = paste0(dims$width, "px"), height = paste0(dims$height, "px"))
       } else {
         shiny::plotOutput(session$ns("ora_plot_all_fallback"), width = paste0(dims$width, "px"), height = paste0(dims$height, "px"))
@@ -1222,6 +1846,23 @@ oraTabServer <- function(
     if (requireNamespace("ggiraph", quietly = TRUE)) {
       output$ora_plot_all <- ggiraph::renderGirafe({
         d <- ora_combined_plot_df()
+        comp_per_panel <- integer(0)
+        panel_labels <- character(0)
+        max_path <- 1L
+        if (!is.null(d$combined) && nrow(d$combined) > 0L) {
+          for (sid in study_ids) {
+            sub <- d$combined[as.character(d$combined$study_id) == sid, , drop = FALSE]
+            if (nrow(sub) < 1L) next
+            comp_per_panel <- c(comp_per_panel, max(3L, length(unique(as.character(sub$comparison)))))
+            panel_labels <- c(panel_labels, unique(as.character(sub$study_label))[[1L]])
+            max_path <- max(max_path, length(unique(as.character(sub$ID))))
+          }
+        }
+        dims <- if (length(comp_per_panel) > 0L) {
+          .ora_faceted_plot_dims(comp_per_panel, max_path, panel_labels = panel_labels)
+        } else {
+          .ora_msg_plot_px()
+        }
         if (!is.null(d$error)) {
           gp <- .ora_msg_plot(d$error)
         } else {
@@ -1229,7 +1870,12 @@ oraTabServer <- function(
           present <- unique(as.character(d$combined$study_label))
           study_label_levels <- all_lbls[all_lbls %in% present]
           gp <- tryCatch(
-            .ora_faceted_comparison_plot_girafe(d$combined, study_label_levels, d$ob$pathway_level_order),
+            .ora_faceted_comparison_plot_girafe(
+              d$combined,
+              study_label_levels,
+              d$ob$pathway_level_order,
+              assay_type_by_label = assay_type_by_label
+            ),
             error = function(err) {
               .ora_msg_plot(paste("Plot:", conditionMessage(err)))
             }
@@ -1240,13 +1886,13 @@ oraTabServer <- function(
         }
         ggiraph::girafe(
           ggobj = gp,
-          width_svg = 14,
-          height_svg = 8,
+          width_svg = max(6, dims$width / 96),
+          height_svg = max(4, dims$height / 96),
           options = list(
             ggiraph::opts_selection(
               type = "single",
               only_shiny = TRUE,
-              css = "stroke:#39ff14;fill:#39ff14;stroke-width:2.2px;"
+              css = "stroke:#39ff14;stroke-width:2.2px;"
             ),
             ggiraph::opts_hover(css = "stroke:#000;stroke-width:1.2px;"),
             ggiraph::opts_sizing(rescale = FALSE)
@@ -1267,7 +1913,12 @@ oraTabServer <- function(
         study_label_levels <- all_lbls[all_lbls %in% present]
 
         tryCatch(
-          .ora_faceted_comparison_plot(combined, study_label_levels, d$ob$pathway_level_order),
+          .ora_faceted_comparison_plot(
+            combined,
+            study_label_levels,
+            d$ob$pathway_level_order,
+            assay_type_by_label = assay_type_by_label
+          ),
           error = function(err) {
             .ora_msg_plot(paste("Plot:", conditionMessage(err)))
           }
@@ -1362,7 +2013,18 @@ oraTabServer <- function(
             pm$mat,
             title = paste0("Pathway heatplot: ", sp$pathway_desc),
             study_label_order = vapply(study_ids, study_label_for, character(1L)),
-            sig_mat = pm$sig_mat
+            sig_mat = pm$sig_mat,
+            pval_mat = pm$pval_mat,
+            assay_type_by_label = assay_type_by_label
+          ),
+          plot_girafe = ora_heatmap_plot_pathway_faceted_girafe(
+            pm$mat,
+            title = paste0("Pathway heatplot: ", sp$pathway_desc),
+            study_label_order = vapply(study_ids, study_label_for, character(1L)),
+            sig_mat = pm$sig_mat,
+            padj_mat = pm$padj_mat,
+            pval_mat = pm$pval_mat,
+            assay_type_by_label = assay_type_by_label
           ),
           mode = "pathway",
           n_rows = nrow(pm$mat),
@@ -1390,7 +2052,17 @@ oraTabServer <- function(
           title = paste0("Comparison heatplot: ", sp$study_label, "::", sp$comparison),
           x_lab = "Genes",
           y_lab = "Pathways",
-          sig_mat = cm$sig_mat
+          sig_mat = cm$sig_mat,
+          pval_mat = cm$pval_mat
+        ),
+        plot_girafe = ora_heatmap_plot_girafe(
+          cm$mat,
+          title = paste0("Comparison heatplot: ", sp$study_label, "::", sp$comparison),
+          x_lab = "Genes",
+          y_lab = "Pathways",
+          sig_mat = cm$sig_mat,
+          padj_mat = cm$padj_mat,
+          pval_mat = cm$pval_mat
         ),
         mode = "comparison",
         n_rows = nrow(cm$mat),
@@ -1402,13 +2074,61 @@ oraTabServer <- function(
     output$ora_heatmap_plot_ui <- shiny::renderUI({
       st <- ora_heatmap_state()
       w <- .ora_heatmap_width_px(st$n_cols)
-      shiny::plotOutput(
-        session$ns("ora_heatmap_plot"),
-        width = paste0(w, "px"),
-        height = "auto",
-        click = session$ns("ora_heatmap_plot_click")
-      )
+      h <- if (identical(st$mode, "pathway")) {
+        .ora_row_heatmap_height_px(st$n_rows)
+      } else if (identical(st$mode, "comparison")) {
+        .ora_comparison_heatmap_height_px(st$n_rows)
+      } else {
+        420L
+      }
+      has_real_heatmap <- !is.null(st$mat) && is.matrix(st$mat) && nrow(st$mat) > 0L && ncol(st$mat) > 0L
+      if (requireNamespace("ggiraph", quietly = TRUE) && has_real_heatmap) {
+        ggiraph::girafeOutput(
+          session$ns("ora_heatmap_plot_girafe"),
+          width = paste0(w, "px"),
+          height = paste0(h, "px")
+        )
+      } else {
+        shiny::plotOutput(
+          session$ns("ora_heatmap_plot"),
+          width = paste0(w, "px"),
+          height = "auto",
+          click = session$ns("ora_heatmap_plot_click")
+        )
+      }
     })
+
+    if (requireNamespace("ggiraph", quietly = TRUE)) {
+      output$ora_heatmap_plot_girafe <- ggiraph::renderGirafe({
+        st <- ora_heatmap_state()
+        w <- .ora_heatmap_width_px(st$n_cols)
+        h <- if (identical(st$mode, "pathway")) {
+          .ora_row_heatmap_height_px(st$n_rows)
+        } else if (identical(st$mode, "comparison")) {
+          .ora_comparison_heatmap_height_px(st$n_rows)
+        } else {
+          420L
+        }
+        gp <- st$plot_girafe
+        if (is.null(gp)) {
+          gp <- st$plot
+        }
+        ggiraph::girafe(
+          ggobj = gp,
+          width_svg = max(6, w / 96),
+          height_svg = max(4, h / 96),
+          options = list(
+            ggiraph::opts_selection(
+              type = "single",
+              only_shiny = TRUE,
+              css = "stroke:#39ff14;stroke-width:2.2px;"
+            ),
+            ggiraph::opts_sizing(rescale = FALSE),
+            ggiraph::opts_hover(css = "stroke:#000;stroke-width:1px;")
+          )
+        )
+      })
+    }
 
     output$ora_heatmap_plot <- shiny::renderPlot({
       st <- ora_heatmap_state()
@@ -1422,6 +2142,32 @@ oraTabServer <- function(
         return(.ora_comparison_heatmap_height_px(st$n_rows))
       }
       420L
+    })
+
+    .ora_gene_from_girafe_selection <- function(sel_id, mode) {
+      if (is.null(sel_id) || !nzchar(as.character(sel_id))) return(NULL)
+      parts <- strsplit(as.character(sel_id), "\\|\\|\\|", fixed = FALSE)[[1L]]
+      if (identical(mode, "comparison")) {
+        # data_id = pathway|||gene
+        if (length(parts) < 2L) return(NULL)
+        return(as.character(parts[[2L]]))
+      }
+      if (identical(mode, "pathway")) {
+        # data_id = gene|||comparison|||study
+        if (length(parts) < 1L) return(NULL)
+        return(as.character(parts[[1L]]))
+      }
+      NULL
+    }
+
+    shiny::observeEvent(input$ora_heatmap_plot_girafe_selected, {
+      if (is.null(on_gene_select) || !is.function(on_gene_select)) return()
+      st <- ora_heatmap_state()
+      if (is.null(st$mat) || !is.matrix(st$mat)) return()
+      gene_symbol <- .ora_gene_from_girafe_selection(input$ora_heatmap_plot_girafe_selected, st$mode)
+      if (!is.null(gene_symbol) && nzchar(trimws(as.character(gene_symbol)))) {
+        on_gene_select(as.character(gene_symbol))
+      }
     })
 
     shiny::observeEvent(input$ora_heatmap_plot_click, {

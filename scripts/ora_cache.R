@@ -178,6 +178,7 @@ ora_long_df_empty_rows <- function(pathway_rel_file = NULL) {
     geneID = character(0),
     gene_ratio = numeric(0),
     Count = integer(0),
+    p_value = numeric(0),
     p_adj = numeric(0),
     setSize = integer(0),
     study_label = character(0),
@@ -252,7 +253,18 @@ ora_long_df_merge_replace_comparison_pathways <- function(
   if (is.null(new_df) || nrow(new_df) < 1L) {
     return(base)
   }
-  rbind(base, new_df)
+  # Older caches may miss newer columns (or vice versa); align schemas before binding.
+  all_cols <- union(colnames(base), colnames(new_df))
+  add_missing_cols <- function(df, cols) {
+    miss <- setdiff(cols, colnames(df))
+    if (length(miss) > 0L) {
+      for (nm in miss) df[[nm]] <- NA
+    }
+    df[, cols, drop = FALSE]
+  }
+  base_aligned <- add_missing_cols(base, all_cols)
+  new_aligned <- add_missing_cols(new_df, all_cols)
+  rbind(base_aligned, new_aligned)
 }
 
 ora_enrichment_long_df_single_study <- function(
@@ -338,6 +350,11 @@ ora_enrichment_long_df_single_study <- function(
     } else {
       rep(NA_real_, nrow(df))
     }
+    p_value <- if ("pvalue" %in% colnames(df)) {
+      as.numeric(df$pvalue)
+    } else {
+      rep(NA_real_, nrow(df))
+    }
 
     set_sz <- if ("setSize" %in% colnames(df)) {
       as.integer(df$setSize)
@@ -353,6 +370,7 @@ ora_enrichment_long_df_single_study <- function(
         geneID = if ("geneID" %in% colnames(df)) as.character(df$geneID[ir]) else NA_character_,
         gene_ratio = gr[ir],
         Count = as.integer(df$Count[ir]),
+        p_value = p_value[ir],
         p_adj = p_adj[ir],
         setSize = set_sz[ir],
         stringsAsFactors = FALSE
@@ -499,6 +517,7 @@ ora_build_plot_payload <- function(
     min_ct,
     min_gene_ratio,
     n_show,
+    max_p_value = 1,
     max_p_adj = 1) {
   out <- stats::setNames(vector("list", length(study_ids)), study_ids)
   lbs <- list()
@@ -519,6 +538,24 @@ ora_build_plot_payload <- function(
     }
 
     df <- ld
+    if (!("p_value" %in% colnames(df))) {
+      if ("pvalue" %in% colnames(df)) {
+        df$p_value <- suppressWarnings(as.numeric(df$pvalue))
+      } else if ("p.value" %in% colnames(df)) {
+        df$p_value <- suppressWarnings(as.numeric(df[["p.value"]]))
+      } else {
+        df$p_value <- NA_real_
+      }
+    }
+    if (!("p_adj" %in% colnames(df))) {
+      if ("p.adjust" %in% colnames(df)) {
+        df$p_adj <- suppressWarnings(as.numeric(df[["p.adjust"]]))
+      } else if ("padj" %in% colnames(df)) {
+        df$p_adj <- suppressWarnings(as.numeric(df$padj))
+      } else {
+        df$p_adj <- NA_real_
+      }
+    }
     if ("Count" %in% colnames(df)) {
       df <- df[df$Count >= min_ct, , drop = FALSE]
     }
@@ -530,6 +567,22 @@ ora_build_plot_payload <- function(
       gr <- as.numeric(df$gene_ratio)
       ok <- !is.na(gr) & gr >= min_gene_ratio
       df <- df[ok, , drop = FALSE]
+    }
+    if (is.finite(max_p_value) && max_p_value < 1) {
+      p_raw <- if ("p_value" %in% colnames(df)) {
+        as.numeric(df$p_value)
+      } else if ("pvalue" %in% colnames(df)) {
+        as.numeric(df$pvalue)
+      } else if ("p.value" %in% colnames(df)) {
+        as.numeric(df[["p.value"]])
+      } else {
+        NULL
+      }
+      # If raw p-values are absent for this dataset/cache, skip this threshold.
+      if (!is.null(p_raw) && any(!is.na(p_raw))) {
+        ok <- !is.na(p_raw) & p_raw <= max_p_value
+        df <- df[ok, , drop = FALSE]
+      }
     }
     if ("p_adj" %in% colnames(df) && is.finite(max_p_adj) && max_p_adj < 1) {
       padj <- as.numeric(df$p_adj)
@@ -551,7 +604,19 @@ ora_build_plot_payload <- function(
     return(list(error = NULL, by_study = out, pathway_level_order = NULL))
   }
 
-  combined_long <- do.call(rbind, lbs)
+  # Mixed cache schemas can differ by optional columns; align before row-binding.
+  align_df_cols <- function(df_list) {
+    all_cols <- character(0)
+    for (d in df_list) all_cols <- union(all_cols, colnames(d))
+    lapply(df_list, function(d) {
+      miss <- setdiff(all_cols, colnames(d))
+      if (length(miss) > 0L) {
+        for (nm in miss) d[[nm]] <- NA
+      }
+      d[, all_cols, drop = FALSE]
+    })
+  }
+  combined_long <- do.call(rbind, align_df_cols(lbs))
   global_ids <- ora_pick_top_pathway_ids(combined_long, n_show)
   if (length(global_ids) == 0L) {
     global_ids <- unique(as.character(combined_long$ID))
@@ -579,6 +644,7 @@ ora_build_plot_payload <- function(
         ID = global_ids[[1L]],
         gene_ratio = NA_real_,
         Count = NA_integer_,
+        p_value = NA_real_,
         p_adj = NA_real_,
         pathway_rank = NA_real_,
         study_label = slbl,

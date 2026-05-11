@@ -270,7 +270,10 @@ ui <- secure_app(dashboardPage(
   ),
   sidebar = dashboardSidebar(
     minified = FALSE,
-    selectInput("study", label = "Study", choices = study_choices, selected = default_study),
+    shiny::conditionalPanel(
+      condition = "input.navtabs == 'info' || input.navtabs == 'degs' || input.navtabs == 'gene'",
+      selectInput("study", label = "Study", choices = study_choices, selected = default_study)
+    ),
     shiny::conditionalPanel(
       condition = "input.navtabs == 'info'",
       uiOutput("info_color_by_ui")
@@ -280,7 +283,7 @@ ui <- secure_app(dashboardPage(
       condition = "input.navtabs == 'degs'",
       selectInput("deg_list", label = "DEG list", choices = default_deg_choices, selected = default_deg),
       uiOutput("deg_description"),
-      selectInput("fdr", label = "Cutoff for FDRs:", c("0.001" = 0.001, "0.01" = 0.01, "0.05" = 0.05, "0.1" = 0.1), selected = default_thr$fdr),
+      selectInput("fdr", label = "Cutoff for FDRs:", c("0.001" = 0.001, "0.01" = 0.01, "0.05" = 0.05, "0.1" = 0.1, "0.5" = 0.5), selected = default_thr$fdr),
       uiOutput("svalue_ui"),
       uiOutput("base_mean_ui"),
       numericInput("log2fc", label = "Minimal abs(log2 fold change):", value = default_thr$log2fc),
@@ -333,7 +336,13 @@ ui <- secure_app(dashboardPage(
       selectInput(
         "ora_fdr_cutoff",
         label = "Maximum adjusted p-value (FDR):",
-        choices = c("0.01" = 0.01, "0.05" = 0.05, "0.1" = 0.1, "1" = 1),
+        choices = c("0.01" = 0.01, "0.05" = 0.05, "0.1" = 0.1, "0.5" = 0.5, "1" = 1),
+        selected = 1
+      ),
+      selectInput(
+        "ora_pvalue_cutoff",
+        label = "Maximum p-value:",
+        choices = c("0.01" = 0.01, "0.05" = 0.05, "0.1" = 0.1, "0.5" = 0.5, "1" = 1),
         selected = 1
       ),
       numericInput("ora_show_category", label = "Max pathways to show:", value = 20L, min = 1L, step = 1L),
@@ -673,6 +682,9 @@ server <- function(input, output, session) {
     fdr_cut <- if (is.null(input$ora_fdr_cutoff)) 1 else as.numeric(input$ora_fdr_cutoff)
     if (is.na(fdr_cut) || fdr_cut <= 0) fdr_cut <- 1
     if (fdr_cut > 1) fdr_cut <- 1
+    p_cut <- if (is.null(input$ora_pvalue_cutoff)) 1 else as.numeric(input$ora_pvalue_cutoff)
+    if (is.na(p_cut) || p_cut <= 0) p_cut <- 1
+    if (p_cut > 1) p_cut <- 1
     sc <- if (is.null(input$ora_show_category)) 20L else input$ora_show_category
     click_target <- if (is.null(input$ora_heatmap_click_target)) "pathway" else as.character(input$ora_heatmap_click_target)
     if (!click_target %in% c("pathway", "comparison")) click_target <- "pathway"
@@ -681,6 +693,7 @@ server <- function(input, output, session) {
       min_overlap = mo,
       min_count = mc,
       min_gene_ratio = mgr,
+      max_p_value = p_cut,
       max_p_adj = fdr_cut,
       show_category = sc,
       click_target = click_target,
@@ -741,7 +754,8 @@ server <- function(input, output, session) {
     }
     # Subset DEGs and matrix to the selected genes only
     res_sub <- res[sel, , drop = FALSE]
-    mm_sub <- mm[res_sub$ens_gene, , drop = FALSE]
+    gene_id_col <- if ("ens_gene" %in% colnames(res_sub)) "ens_gene" else "symbol"
+    mm_sub <- mm[as.character(res_sub[[gene_id_col]]), , drop = FALSE]
 
     if (isTRUE(apply_thresholds)) {
       # Apply numeric thresholds within the selected genes only
@@ -1053,7 +1067,7 @@ server <- function(input, output, session) {
     rv$current_col_annot <- loaded$col_annot
     d <- deg_list_threshold_defaults(input$study, input$deg_list)
     rv$threshold_defaults <- d
-    fdr_choices <- c(0.001, 0.01, 0.05, 0.1)
+    fdr_choices <- c(0.001, 0.01, 0.05, 0.1, 0.5)
     fdr_sel <- d$fdr
     if (!fdr_sel %in% fdr_choices) {
       message(
@@ -1063,7 +1077,12 @@ server <- function(input, output, session) {
       )
       fdr_sel <- default_heatmap_thresholds()$fdr
     }
-    updateSelectInput(session, "fdr", selected = fdr_sel)
+    updateSelectInput(
+      session,
+      "fdr",
+      choices = c("0.001" = 0.001, "0.01" = 0.01, "0.05" = 0.05, "0.1" = 0.1, "0.5" = 0.5),
+      selected = fdr_sel
+    )
     updateNumericInput(session, "log2fc", value = d$log2fc)
     output$ht_heatmap <- renderPlot({
       grid.newpage()

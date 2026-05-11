@@ -11,7 +11,9 @@ default_heatmap_thresholds <- function() {
 # Row indices into `res` for genes that pass numeric thresholds and finite z-scores (same rules as make_heatmap).
 filter_heatmap_row_index <- function(res, mm, fdr, base_mean, log2fc, svalue) {
   if (is.null(res) || is.null(mm) || nrow(res) == 0L) return(NULL)
-  mm <- mm[res$ens_gene, , drop = FALSE]
+  gene_id_col <- if ("ens_gene" %in% colnames(res)) "ens_gene" else "symbol"
+  gene_ids <- as.character(res[[gene_id_col]])
+  mm <- mm[gene_ids, , drop = FALSE]
   l <- res$padj <= fdr & abs(res$log2FoldChange) >= log2fc
   if ("baseMean" %in% colnames(res)) l <- l & res$baseMean >= base_mean
   if ("svalue" %in% colnames(res)) l <- l & res$svalue <= svalue
@@ -31,7 +33,9 @@ make_heatmap <- function(res, mm, fdr = 0.05, base_mean = 0, log2fc = 1, svalue 
   if (is.null(res) || is.null(mm) || nrow(res) == 0L) return(NULL)
   row_index <- filter_heatmap_row_index(res, mm, fdr, base_mean, log2fc, svalue)
   if (is.null(row_index)) return(NULL)
-  mm <- mm[res$ens_gene, , drop = FALSE]
+  gene_id_col <- if ("ens_gene" %in% colnames(res)) "ens_gene" else "symbol"
+  gene_ids <- as.character(res[[gene_id_col]])
+  mm <- mm[gene_ids, , drop = FALSE]
   m <- mm[row_index, , drop = FALSE]
   m_z <- t(scale(t(m)))
   if (nrow(m_z) == 0L) return(NULL)

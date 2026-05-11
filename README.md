@@ -128,3 +128,16 @@ write_gene_deg_long(df, "your_study_id")
 ### Password hashing utility
 
 `scripts/hash_password.R` can use the **scrypt** package if present; it falls back otherwise. Only relevant if you manage `shinymanager` credentials with that script.
+
+### Custom modules
+
+Module: Mechanism-driven mitochondrial gene sets
+
+Description:
+Genes involved in the formation and maintenance of mitochondrial cristae structure,
+including MICOS complex components and ATP synthase–mediated membrane curvature.
+
+Sources:
+- Pfanner et al., Nat Rev Mol Cell Biol (2014)
+- Rampelt et al., J Cell Biol (2017)
+- MitoCarta3.0 (for gene localization)

@@ -160,15 +160,18 @@ load_study_data <- function(study_id, deg_file) {
     if (length(keep) > 0L) mm <- mm[, keep, drop = FALSE]
   }
 
-  required <- c("padj", "log2FoldChange", "symbol", "ens_gene")
-  if (!all(required %in% colnames(res))) return(list(res = NULL, mm = NULL, col_annot = NULL))
+  required_base <- c("padj", "log2FoldChange", "symbol")
+  if (!all(required_base %in% colnames(res))) return(list(res = NULL, mm = NULL, col_annot = NULL))
 
-  keep <- res$ens_gene %in% rownames(mm)
+  gene_id_col <- if ("ens_gene" %in% colnames(res)) "ens_gene" else "symbol"
+  gene_ids <- as.character(res[[gene_id_col]])
+  keep <- !is.na(gene_ids) & nzchar(gene_ids) & (gene_ids %in% rownames(mm))
   res <- res[keep, , drop = FALSE]
-  mm <- mm[res$ens_gene, , drop = FALSE]
+  gene_ids_kept <- as.character(res[[gene_id_col]])
+  mm <- mm[gene_ids_kept, , drop = FALSE]
   message(
     "load_study_data: filtered nrow(res) = ", nrow(res),
-    " (kept ", sum(keep), " / ", length(keep), " rows)"
+    " (kept ", sum(keep), " / ", length(keep), " rows; matched by ", gene_id_col, ")"
   )
 
   col_annot <- NULL
