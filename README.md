@@ -12,6 +12,18 @@ shiny::runApp("app.R")
 
 Configuration lives in `config.yaml` (app title and study list). Per-study settings and data paths are under `data/<study_id>/config.yaml`. Count matrices and metadata are expected in the locations referenced there.
 
+Per-study count matrix config supports both:
+
+- top-level `counts_file` (legacy and still supported), and
+- optional per-comparison override `deg_lists[].counts_file`.
+
+When `deg_lists[].counts_file` is set, DEGs and ORA use that matrix for the selected DEG list; otherwise they fall back to top-level `counts_file`.
+
+For the Gene tab:
+
+- if top-level `counts_file` exists and is valid, the app uses that single matrix for the study;
+- otherwise the app groups DEG lists by resolved count matrix and renders one plot panel per unique matrix (panel title is DEG `label` list joined with commas).
+
 ## R package dependencies
 
 The dashboard is not shipped as a formal R package (there is no `DESCRIPTION`), so dependencies are listed here.

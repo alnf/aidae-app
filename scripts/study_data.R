@@ -5,11 +5,7 @@
 # Gene tab: full-sample counts + metadata; global DEGs long table (separate from heatmap cache keys)
 .gene_tab_cache <- new.env(parent = emptyenv())
 
-study_deg_lists <- function(study_id) {
-  if (is.null(study_id) || study_id == "") return(list())
-  cfg_path <- file.path("data", study_id, "config.yaml")
-  if (!file.exists(cfg_path)) return(list())
-  cfg <- yaml::read_yaml(cfg_path)
+study_deg_lists_from_cfg <- function(cfg, study_id) {
   if (!is.null(cfg$deg_lists) && length(cfg$deg_lists) > 0L) {
     return(cfg$deg_lists)
   }
@@ -17,6 +13,31 @@ study_deg_lists <- function(study_id) {
     return(list(list(label = if (!is.null(cfg$name)) cfg$name else study_id, deg_file = cfg$deg_file)))
   }
   list()
+}
+
+resolve_counts_file_for_deg <- function(cfg, study_id, deg_file = NULL, label = NULL) {
+  lists <- study_deg_lists_from_cfg(cfg, study_id)
+  idx <- NA_integer_
+  if (!is.null(deg_file) && nzchar(as.character(deg_file))) {
+    idx <- match(as.character(deg_file), vapply(lists, function(x) x$deg_file, character(1L)))
+  } else if (!is.null(label) && nzchar(as.character(label))) {
+    idx <- match(as.character(label), vapply(lists, function(x) x$label, character(1L)))
+  }
+  if (!is.na(idx)) {
+    cf <- lists[[idx]]$counts_file
+    if (!is.null(cf) && nzchar(as.character(cf))) return(as.character(cf))
+  }
+  cf <- cfg$counts_file
+  if (!is.null(cf) && nzchar(as.character(cf))) return(as.character(cf))
+  NULL
+}
+
+study_deg_lists <- function(study_id) {
+  if (is.null(study_id) || study_id == "") return(list())
+  cfg_path <- file.path("data", study_id, "config.yaml")
+  if (!file.exists(cfg_path)) return(list())
+  cfg <- yaml::read_yaml(cfg_path)
+  study_deg_lists_from_cfg(cfg, study_id)
 }
 
 samples_for_comparison <- function(study_id, label) {
@@ -105,7 +126,11 @@ load_study_data <- function(study_id, deg_file) {
   cfg <- yaml::read_yaml(cfg_path)
 
   deg_path <- file.path("data", study_id, deg_file)
-  counts_path <- file.path("data", study_id, cfg$counts_file)
+  counts_rel <- resolve_counts_file_for_deg(cfg, study_id, deg_file = deg_file)
+  if (is.null(counts_rel) || !nzchar(counts_rel)) {
+    return(list(res = NULL, mm = NULL, col_annot = NULL))
+  }
+  counts_path <- file.path("data", study_id, counts_rel)
   if (!file.exists(deg_path)) return(list(res = NULL, mm = NULL, col_annot = NULL))
   counts_eds_path <- sub("\\.(tsv|txt|csv|rds)$", ".eds", counts_path, ignore.case = TRUE)
   if (identical(counts_eds_path, counts_path)) {
@@ -142,8 +167,7 @@ load_study_data <- function(study_id, deg_file) {
     }
   )
 
-  lists <- if (!is.null(cfg$deg_lists) && length(cfg$deg_lists) > 0L) cfg$deg_lists else
-    if (!is.null(cfg$deg_file)) list(list(label = if (!is.null(cfg$name)) cfg$name else study_id, deg_file = cfg$deg_file)) else list()
+  lists <- study_deg_lists_from_cfg(cfg, study_id)
   idx <- match(deg_file, vapply(lists, function(x) x$deg_file, character(1L)))
   label <- if (!is.na(idx) && !is.null(lists[[idx]]$label)) lists[[idx]]$label else NULL
 
@@ -325,6 +349,152 @@ load_gene_tab_study <- function(study_id) {
   )
   assign(cache_key, out, envir = .gene_tab_cache)
   out
+}
+
+load_gene_tab_matrix_for_counts <- function(study_id, cfg, counts_rel) {
+  if (is.null(counts_rel) || !nzchar(as.character(counts_rel))) return(NULL)
+  if (is.null(cfg$metadata_file) || !nzchar(as.character(cfg$metadata_file))) return(NULL)
+
+  cache_key <- paste("gene_tab_matrix", study_id, counts_rel, cfg$metadata_file, sep = "|")
+  if (exists(cache_key, envir = .gene_tab_cache, inherits = FALSE)) {
+    return(get(cache_key, envir = .gene_tab_cache, inherits = FALSE))
+  }
+
+  counts_path <- file.path("data", study_id, counts_rel)
+  meta_path <- file.path("data", study_id, cfg$metadata_file)
+  counts_eds_path <- sub("\\.(tsv|txt|csv|rds)$", ".eds", counts_path, ignore.case = TRUE)
+  if (identical(counts_eds_path, counts_path)) {
+    counts_eds_path <- paste0(counts_path, ".eds")
+  }
+  counts_rds_path <- sub("\\.(tsv|txt|csv)$", ".rds", counts_path, ignore.case = TRUE)
+  if (identical(counts_rds_path, counts_path)) {
+    counts_rds_path <- paste0(counts_path, ".rds")
+  }
+  if (!file.exists(meta_path)) return(NULL)
+  if (!file.exists(counts_eds_path) && !file.exists(counts_rds_path) && !file.exists(counts_path)) return(NULL)
+
+  mm <- perf_time(
+    sprintf("load_gene_tab_matrix_for_counts[%s|%s]: read_counts", study_id, counts_rel),
+    {
+      if (file.exists(counts_eds_path)) {
+        message("Using counts EDS file at ", counts_eds_path)
+        readRDS(counts_eds_path)
+      } else if (file.exists(counts_rds_path)) {
+        message("Using counts RDS file at ", counts_rds_path)
+        readRDS(counts_rds_path)
+      } else {
+        read.table(counts_path, sep = "\t", header = TRUE, check.names = FALSE)
+      }
+    }
+  )
+
+  meta_key <- paste(study_id, cfg$metadata_file, sep = "|")
+  if (exists(meta_key, envir = .metadata_cache, inherits = FALSE)) {
+    meta <- get(meta_key, envir = .metadata_cache, inherits = FALSE)
+  } else {
+    meta <- perf_time(
+      sprintf("load_gene_tab_matrix_for_counts[%s|%s]: read_metadata", study_id, counts_rel),
+      read.table(meta_path, sep = "\t", header = TRUE, check.names = FALSE)
+    )
+    assign(meta_key, meta, envir = .metadata_cache)
+  }
+
+  if (!all(c("SampleNumber", "PhenoNames") %in% colnames(meta))) return(NULL)
+
+  sample_cols <- colnames(mm)
+  meta_ids <- as.character(meta$SampleNumber)
+  common <- intersect(sample_cols, meta_ids)
+  if (length(common) == 0L) return(NULL)
+  mm <- mm[, common, drop = FALSE]
+  idx <- match(colnames(mm), meta_ids)
+  ok <- !is.na(idx)
+  if (!all(ok)) {
+    mm <- mm[, ok, drop = FALSE]
+    idx <- idx[ok]
+  }
+  metadata <- meta[idx, , drop = FALSE]
+  rownames(metadata) <- NULL
+
+  mm_num <- suppressWarnings(apply(mm, 2, as.numeric))
+  if (is.null(dim(mm_num))) {
+    mm_num <- matrix(mm_num, ncol = 1L)
+    rownames(mm_num) <- rownames(mm)
+    colnames(mm_num) <- colnames(mm)
+  }
+  finite_vals <- as.vector(mm_num)
+  finite_vals <- finite_vals[is.finite(finite_vals)]
+  is_count_like <- length(finite_vals) > 0L && all(abs(finite_vals - round(finite_vals)) < 1e-8)
+
+  out <- list(mm = mm, metadata = metadata, is_count_like = is_count_like, counts_file = counts_rel)
+  assign(cache_key, out, envir = .gene_tab_cache)
+  out
+}
+
+load_gene_tab_study_panels <- function(study_id) {
+  if (is.null(study_id) || study_id == "") return(NULL)
+  cfg_path <- file.path("data", study_id, "config.yaml")
+  if (!file.exists(cfg_path)) return(NULL)
+  cfg <- yaml::read_yaml(cfg_path)
+
+  global <- load_gene_tab_study(study_id)
+  if (!is.null(global)) {
+    return(list(
+      mode = "global",
+      cfg = cfg,
+      panels = list(list(
+        key = "global",
+        title = NULL,
+        labels = character(0),
+        counts_file = cfg$counts_file,
+        mm = global$mm,
+        metadata = global$metadata,
+        is_count_like = isTRUE(global$is_count_like)
+      ))
+    ))
+  }
+
+  lists <- study_deg_lists_from_cfg(cfg, study_id)
+  if (length(lists) < 1L) return(NULL)
+  labels_all <- vapply(lists, function(x) as.character(x$label), character(1L))
+  dup_labels <- unique(labels_all[duplicated(labels_all)])
+  if (length(dup_labels) > 0L) {
+    message("Duplicate DEG labels in study ", study_id, ": ", paste(dup_labels, collapse = ", "))
+  }
+
+  entries <- list()
+  for (entry in lists) {
+    lbl <- if (!is.null(entry$label)) as.character(entry$label) else ""
+    dfile <- if (!is.null(entry$deg_file)) as.character(entry$deg_file) else ""
+    if (!nzchar(lbl) || !nzchar(dfile)) next
+    rel <- resolve_counts_file_for_deg(cfg, study_id, deg_file = dfile, label = lbl)
+    if (is.null(rel) || !nzchar(rel)) next
+    entries[[length(entries) + 1L]] <- list(label = lbl, deg_file = dfile, counts_file = rel)
+  }
+  if (length(entries) < 1L) return(NULL)
+
+  keys <- vapply(entries, function(x) x$counts_file, character(1L))
+  uniq_keys <- unique(keys)
+  panels <- list()
+  for (k in uniq_keys) {
+    idx <- which(keys == k)
+    ent <- entries[idx]
+    mat <- load_gene_tab_matrix_for_counts(study_id, cfg, k)
+    if (is.null(mat)) next
+    panel_labels <- vapply(ent, function(x) x$label, character(1L))
+    panel_deg_files <- vapply(ent, function(x) x$deg_file, character(1L))
+    panels[[length(panels) + 1L]] <- list(
+      key = paste0("matrix_", length(panels) + 1L),
+      title = paste(panel_labels, collapse = ", "),
+      labels = panel_labels,
+      deg_files = panel_deg_files,
+      counts_file = k,
+      mm = mat$mm,
+      metadata = mat$metadata,
+      is_count_like = isTRUE(mat$is_count_like)
+    )
+  }
+  if (length(panels) < 1L) return(NULL)
+  list(mode = "grouped", cfg = cfg, panels = panels)
 }
 
 # Precomputed global DEGs long table (cfg$gdegs_file). NULL if unset, missing, or unreadable. Cached as gene_tab_gdegs|<study_id>.

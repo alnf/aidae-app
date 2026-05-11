@@ -463,14 +463,31 @@ server <- function(input, output, session) {
     )
   )
 
-  info_data <- shiny::reactive({
+  info_panel_set <- shiny::reactive({
     if (is.null(input$study) || input$study == "") return(NULL)
-    load_gene_tab_study(input$study)
+    load_gene_tab_study_panels(input$study)
+  })
+
+  info_data <- shiny::reactive({
+    ps <- info_panel_set()
+    if (is.null(ps) || length(ps$panels) < 1L) return(NULL)
+    p1 <- ps$panels[[1L]]
+    list(mm = p1$mm, metadata = p1$metadata, is_count_like = p1$is_count_like)
   })
 
   output$info_color_by_ui <- renderUI({
-    dat <- info_data()
-    if (is.null(dat) || is.null(dat$metadata) || nrow(dat$metadata) < 1L) {
+    ps <- info_panel_set()
+    if (is.null(ps) || length(ps$panels) < 1L) {
+      return(
+        tags$div(
+          class = "text-muted",
+          style = "padding: 6px 0;",
+          "No metadata available for selected study."
+        )
+      )
+    }
+    dat <- list(metadata = ps$panels[[1L]]$metadata)
+    if (is.null(dat$metadata) || nrow(dat$metadata) < 1L) {
       return(
         tags$div(
           class = "text-muted",
@@ -506,22 +523,38 @@ server <- function(input, output, session) {
   })
 
   output$info_pca_ui <- renderUI({
-    if (requireNamespace("ggiraph", quietly = TRUE)) {
-      return(ggiraph::girafeOutput("info_pca_girafe", width = "100%", height = "500px"))
+    ps <- info_panel_set()
+    if (is.null(ps) || length(ps$panels) < 1L) {
+      return(tags$div(class = "text-muted", "No data available for PCA."))
     }
-    plotOutput("info_pca_plot", height = 500, width = "100%")
+    use_girafe <- requireNamespace("ggiraph", quietly = TRUE)
+    out <- list()
+    for (i in seq_along(ps$panels)) {
+      panel <- ps$panels[[i]]
+      p_title <- if (is.null(panel$title) || !nzchar(as.character(panel$title))) {
+        paste0("Panel ", i)
+      } else {
+        as.character(panel$title)
+      }
+      out[[length(out) + 1L]] <- tags$div(
+        style = "font-weight: 600; margin: 6px 0 4px 0;",
+        p_title
+      )
+      out_id <- paste0("info_pca_", i)
+      out[[length(out) + 1L]] <- if (use_girafe) {
+        ggiraph::girafeOutput(out_id, width = "100%", height = "460px")
+      } else {
+        plotOutput(out_id, height = 460, width = "100%")
+      }
+    }
+    tagList(out)
   })
 
-  info_pca_data <- shiny::reactive({
-    dat <- info_data()
-    shiny::req(dat, dat$mm, dat$metadata)
-    shiny::req(input$info_color_by)
-    mm <- dat$mm
-    meta <- dat$metadata
+  info_pca_data_one <- function(mm, meta, color_by, study_label) {
     if (ncol(mm) < 2L) {
       return(list(ok = FALSE, msg = "At least 2 samples are required for PCA."))
     }
-    if (!input$info_color_by %in% colnames(meta)) {
+    if (!color_by %in% colnames(meta)) {
       return(list(ok = FALSE, msg = "Selected metadata column is not available."))
     }
     mm_num <- suppressWarnings(apply(mm, 2, as.numeric))
@@ -550,22 +583,19 @@ server <- function(input, output, session) {
       SampleNumber = rownames(pca$x),
       PC1 = pca$x[, 1],
       PC2 = pca$x[, 2],
-      ColorBy = as.character(meta[[input$info_color_by]]),
+      ColorBy = as.character(meta[[color_by]]),
       stringsAsFactors = FALSE
     )
     pca_df$ColorBy[is.na(pca_df$ColorBy) | !nzchar(pca_df$ColorBy)] <- "(missing)"
-    study_label <- study_labels[match(input$study, study_ids)]
-    if (is.na(study_label) || !nzchar(study_label)) study_label <- input$study
     list(
       ok = TRUE,
       pca_df = pca_df,
       study_label = study_label,
       var_expl = var_expl
     )
-  })
+  }
 
-  info_pca_base_plot <- shiny::reactive({
-    pd <- info_pca_data()
+  info_pca_base_plot <- function(pd, color_by) {
     if (!isTRUE(pd$ok)) {
       return(
         ggplot2::ggplot() +
@@ -580,43 +610,62 @@ server <- function(input, output, session) {
         title = paste0("PCA - ", pd$study_label),
         x = sprintf("PC1 (%.1f%%)", 100 * pd$var_expl[1]),
         y = sprintf("PC2 (%.1f%%)", 100 * pd$var_expl[2]),
-        color = input$info_color_by
+        color = color_by
       ) +
       ggplot2::theme_minimal(base_size = 13)
-  })
-
-  output$info_pca_plot <- renderPlot({
-    info_pca_base_plot()
-  })
-
-  if (requireNamespace("ggiraph", quietly = TRUE)) {
-    output$info_pca_girafe <- ggiraph::renderGirafe({
-      pd <- info_pca_data()
-      if (!isTRUE(pd$ok)) {
-        return(ggiraph::girafe(ggobj = info_pca_base_plot()))
-      }
-      p <- ggplot2::ggplot(pd$pca_df, ggplot2::aes(x = PC1, y = PC2, color = ColorBy)) +
-        ggiraph::geom_point_interactive(
-          ggplot2::aes(
-            tooltip = paste0("Sample: ", SampleNumber, "\n", input$info_color_by, ": ", ColorBy),
-            data_id = SampleNumber
-          ),
-          size = 3, alpha = 0.85
-        ) +
-        ggplot2::labs(
-          title = paste0("PCA - ", pd$study_label),
-          x = sprintf("PC1 (%.1f%%)", 100 * pd$var_expl[1]),
-          y = sprintf("PC2 (%.1f%%)", 100 * pd$var_expl[2]),
-          color = input$info_color_by
-        ) +
-        ggplot2::theme_minimal(base_size = 13)
-      ggiraph::girafe(
-        ggobj = p,
-        width_svg = 10,
-        height_svg = 5
-      )
-    })
   }
+
+  observe({
+    ps <- info_panel_set()
+    shiny::req(ps, ps$panels, input$info_color_by)
+    use_girafe <- requireNamespace("ggiraph", quietly = TRUE)
+    sid_lbl <- study_labels[match(input$study, study_ids)]
+    if (is.na(sid_lbl) || !nzchar(sid_lbl)) sid_lbl <- input$study
+    for (i in seq_along(ps$panels)) {
+      local({
+        idx <- i
+        panel <- ps$panels[[idx]]
+        panel_title <- if (is.null(panel$title) || !nzchar(as.character(panel$title))) {
+          sid_lbl
+        } else {
+          paste0(sid_lbl, " — ", as.character(panel$title))
+        }
+        pd <- info_pca_data_one(panel$mm, panel$metadata, input$info_color_by, panel_title)
+        out_id <- paste0("info_pca_", idx)
+        if (use_girafe) {
+          output[[out_id]] <- ggiraph::renderGirafe({
+            if (!isTRUE(pd$ok)) {
+              return(ggiraph::girafe(ggobj = info_pca_base_plot(pd, input$info_color_by)))
+            }
+            p <- ggplot2::ggplot(pd$pca_df, ggplot2::aes(x = PC1, y = PC2, color = ColorBy)) +
+              ggiraph::geom_point_interactive(
+                ggplot2::aes(
+                  tooltip = paste0("Sample: ", SampleNumber, "\n", input$info_color_by, ": ", ColorBy),
+                  data_id = SampleNumber
+                ),
+                size = 3, alpha = 0.85
+              ) +
+              ggplot2::labs(
+                title = paste0("PCA - ", pd$study_label),
+                x = sprintf("PC1 (%.1f%%)", 100 * pd$var_expl[1]),
+                y = sprintf("PC2 (%.1f%%)", 100 * pd$var_expl[2]),
+                color = input$info_color_by
+              ) +
+              ggplot2::theme_minimal(base_size = 13)
+            ggiraph::girafe(
+              ggobj = p,
+              width_svg = 10,
+              height_svg = 4.8
+            )
+          })
+        } else {
+          output[[out_id]] <- renderPlot({
+            info_pca_base_plot(pd, input$info_color_by)
+          })
+        }
+      })
+    }
+  })
 
   output$info_metadata_table_ui <- renderUI({
     dat <- info_data()
