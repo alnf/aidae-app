@@ -56,7 +56,7 @@ These are loaded from `app.R` and are needed for heatmaps, tables, layout, and a
 | **shiny** | App framework |
 | **bs4Dash** | UI layout |
 | **shinymanager** | Login / auth |
-| **InteractiveComplexHeatmap**, **ComplexHeatmap**, **circlize** | Interactive heatmaps |
+| **InteractiveComplexHeatmap**, **ComplexHeatmap**, **circlize** | Interactive heatmaps and **UpSet** tab (`UpSet()`, `make_comb_mat()`, row annotations) |
 | **yaml** | Reading `config.yaml` and study configs |
 | **DT** | Result tables |
 | **GetoptLong** | Used in the app (brush / utilities) |
@@ -125,6 +125,12 @@ BiocManager::install("clusterProfiler")
 ```r
 install.packages(c("ggplot2", "ggiraph"))
 ```
+
+### UpSet tab (DEG list intersections)
+
+The **UpSet** tab shows intersections of significant genes across **every DEG list** from **all studies** listed in the main `config.yaml`, using the same filtering as the heatmap (`load_study_data()` + `filter_heatmap_row_index()` + `deg_list_threshold_defaults()`). **Sidebar thresholds apply only to the UpSet tab** (they are not the DEGs-tab sliders). Use **Refresh thresholds for selected list** to store overrides for one list, **Apply current thresholds to all lists** to copy the sidebar values onto every configured DEG list for this session, or **Reset all lists to default thresholds** to drop every override and return to YAML defaults. **Row (set) order** above the plot can follow **study then list label** only, or **largest intersection overlap bar** each set participates in (descending; list label breaks ties). **Max lists per intersection** defaults to **2** and caps `comb_degree` on the combination matrix (see the [ComplexHeatmap UpSet book](https://jokergoo.github.io/ComplexHeatmap-reference/book/upset-plot.html)). The combination matrix is built with **`make_comb_mat(..., mode = "intersect")`**: a column with pattern `110` is genes in sets 1 and 2 that may also appear in other sets, so **all pairwise bars** (`110`, `101`, `011`, …) are present for non-empty overlaps. **Single-set intersection columns** (degree 1) are not drawn — each list’s total size is the **set-size** bar on the **right**. (The alternative **`distinct`** mode uses exclusive partitions and can omit pairwise columns when an exclusive slice is empty.) The figure is **ComplexHeatmap** `UpSet()` with **Label**, **assay**, and **study** to the **left** of the matrix; assay/study **legends** are drawn **above the matrix** in the same graphic (`heatmap_legend_list`). A small **gap** separates the intersection-size strip from the matrix body. Below: **gene multiplicity** (ggplot2). Use the intersection dropdown and **Copy genes** to copy symbols (same browser clipboard handler as elsewhere).
+
+The UpSet tab reuses **ComplexHeatmap** from the main app install (Bioconductor/CRAN as for heatmaps); no extra package is required beyond **ggplot2** for the multiplicity plot.
 
 **Custom ontology (ORA sidebar):** upload an `.xlsx` in **long** format: **column 1 = gene symbol**, **column 2 = category** (pathway). This differs from Enrichr-style `.txt` files in the dropdown (one line per pathway, genes across columns). Here each row assigns one gene to one category; the app derives **one gene set per category** (all symbols in rows with that category), then builds the same `TERM2GENE` table `enricher` expects. **Gene symbols may be lower- or mixed-case in the file; the app uppercases them** so matching to DEG tables is case-insensitive. Category text is kept as in the sheet (trimmed). Named columns `symbol` / `category` are preferred (`gene` / `pathway` allowed; otherwise the first two columns are used). The app runs the same `clusterProfiler::enricher` pipeline as for built-in pathway files (no RDS cache for this mode). Install **readxl**:
 

@@ -19,6 +19,7 @@ source("scripts/gene_tab.R")
 source("scripts/pathway_signatures.R")
 source("scripts/ora_cache.R")
 source("scripts/ora_tab.R")
+source("scripts/upset_tab.R")
 
 # UI defaults align with make_heatmap() / default_heatmap_thresholds(); study+DEG list can override via config.
 default_thr <- default_heatmap_thresholds()
@@ -106,6 +107,28 @@ default_deg_choices <- if (length(first_study_lists) > 0L) {
   c("(no DEG lists)" = "")
 }
 default_deg <- if (length(first_study_lists) > 0L) first_study_lists[[1L]]$deg_file else ""
+
+default_upset_study <- if (length(study_ids) > 0L) study_ids[[1L]] else ""
+upset_lists0 <- study_deg_lists(default_upset_study)
+default_upset_deg <- if (length(upset_lists0) > 0L) upset_lists0[[1L]]$deg_file else ""
+default_upset_deg_choices <- if (length(upset_lists0) > 0L) {
+  setNames(
+    vapply(upset_lists0, function(x) x$deg_file, character(1L)),
+    vapply(upset_lists0, function(x) x$label, character(1L))
+  )
+} else {
+  c("(no DEG lists)" = "")
+}
+upset_study_choices <- if (length(study_ids) > 0L) {
+  stats::setNames(study_ids, study_labels)
+} else {
+  c("(no studies)" = "")
+}
+n_upset_deg_tasks <- if (length(study_ids) > 0L) {
+  length(ora_build_deg_tasks(study_ids, stats::setNames(study_labels, study_ids)))
+} else {
+  1L
+}
 
 pathway_txt_files <- list_ora_pathway_files(
   study_ids,
@@ -284,6 +307,14 @@ body <- dashboardBody(
         width = 12, solidHeader = TRUE, status = "secondary",
         oraTabUI("ora", study_ids, stats::setNames(study_labels, study_ids), ora_file_choices, ora_pathway_default)
       )
+    ),
+    tabItem(
+      tabName = "upset",
+      box(
+        title = "DEG list intersections (UpSet)",
+        width = 12, solidHeader = TRUE, status = "secondary",
+        upsetTabUI("upset")
+      )
     )
   )
 )
@@ -301,7 +332,8 @@ ui <- secure_app(dashboardPage(
       navbarTab(tabName = "info", text = "Info"),
       navbarTab(tabName = "degs", text = "DEGs"),
       navbarTab(tabName = "gene", text = "Gene"),
-      navbarTab(tabName = "ora", text = "ORA")
+      navbarTab(tabName = "ora", text = "ORA"),
+      navbarTab(tabName = "upset", text = "UpSet")
     )
   ),
   sidebar = dashboardSidebar(
@@ -410,6 +442,42 @@ ui <- secure_app(dashboardPage(
         style = "padding: 10px 12px; font-size: 0.9rem;",
         "Choose a gene in the main panel. Study selection also controls the Info tab."
       )
+    ),
+    shiny::conditionalPanel(
+      condition = "input.navtabs == 'upset'",
+      shiny::tags$div(
+        style = "padding-bottom: 28px;",
+        shiny::tags$div(
+          class = "text-muted",
+          style = "font-size: 0.82rem; margin-bottom: 8px;",
+          "UpSet uses ",
+          shiny::tags$strong("all"),
+          " DEG lists from every study in the main config. Thresholds here apply ",
+          shiny::tags$strong("only to the UpSet tab"),
+          " (not the DEGs tab sliders). Pick a study and list to edit values, then use the buttons below."
+        ),
+        shiny::numericInput(
+          "upset_max_degree",
+          label = "Max lists per intersection (degree):",
+          value = min(2L, max(2L, as.integer(n_upset_deg_tasks))),
+          min = 2L,
+          max = max(8L, as.integer(n_upset_deg_tasks)),
+          step = 1L
+        ),
+        selectInput("upset_study", label = "Study (threshold target)", choices = upset_study_choices, selected = default_upset_study),
+        selectInput("upset_deg_list", label = "DEG list (threshold target)", choices = default_upset_deg_choices, selected = default_upset_deg),
+        uiOutput("upset_deg_description"),
+        selectInput("upset_fdr", label = "Cutoff for FDRs:", c("0.001" = 0.001, "0.01" = 0.01, "0.05" = 0.05, "0.1" = 0.1, "0.5" = 0.5), selected = default_thr$fdr),
+        uiOutput("upset_svalue_sidebar"),
+        uiOutput("upset_base_mean_sidebar"),
+        numericInput("upset_log2fc", label = "Minimal abs(log2 fold change):", value = default_thr$log2fc),
+        shiny::tags$div(
+          style = "display: flex; flex-direction: column; gap: 10px; margin-top: 4px;",
+          shiny::actionButton("upset_refresh", label = "Refresh thresholds for selected list", class = "btn-primary", width = "100%"),
+          shiny::actionButton("upset_thr_apply_all", label = "Apply current thresholds to all lists", class = "btn-secondary", width = "100%"),
+          shiny::actionButton("upset_thr_reset_all", label = "Reset all lists to default thresholds", class = "btn-outline-secondary", width = "100%")
+        )
+      )
     )
   ),
   controlbar = dashboardControlbar(disable = TRUE),
@@ -434,6 +502,171 @@ server <- function(input, output, session) {
     study_ids,
     stats::setNames(study_labels, study_ids),
     external_symbol = shiny::reactive(gene_jump_symbol())
+  )
+
+  upset_refresh_n <- shiny::reactiveVal(0L)
+  upset_thr_overrides <- shiny::reactiveValues()
+
+  shiny::observeEvent(input$upset_refresh, {
+    sid <- input$upset_study %||% ""
+    deg <- input$upset_deg_list %||% ""
+    if (!nzchar(sid) || !nzchar(deg)) {
+      shiny::showNotification("Select a study and DEG list before refreshing.", type = "warning")
+      return()
+    }
+    th <- upset_thr_sidebar()
+    key <- paste(sid, deg, sep = "|")
+    upset_thr_overrides[[key]] <- list(
+      fdr = as.numeric(th$fdr),
+      log2fc = as.numeric(th$log2fc),
+      base_mean = as.numeric(th$base_mean %||% 0),
+      svalue = as.numeric(th$svalue %||% default_heatmap_thresholds()$svalue)
+    )
+    upset_refresh_n(upset_refresh_n() + 1L)
+    shiny::showNotification("Threshold override saved for this DEG list. Rebuilding UpSet.", type = "message")
+  }, ignoreInit = TRUE)
+
+  shiny::observeEvent(input$upset_thr_apply_all, {
+    tasks <- ora_build_deg_tasks(study_ids, stats::setNames(study_labels, study_ids), deg_filter = NULL)
+    if (length(tasks) < 1L) {
+      shiny::showNotification("No DEG lists found in config.", type = "warning")
+      return()
+    }
+    th <- upset_thr_sidebar()
+    d0 <- default_heatmap_thresholds()
+    n <- 0L
+    for (tk in tasks) {
+      deg_rel <- tk$entry$deg_file
+      if (is.null(deg_rel) || !nzchar(as.character(deg_rel))) next
+      key <- paste(tk$sid, deg_rel, sep = "|")
+      upset_thr_overrides[[key]] <- list(
+        fdr = as.numeric(th$fdr %||% d0$fdr),
+        log2fc = as.numeric(th$log2fc %||% d0$log2fc),
+        base_mean = as.numeric(th$base_mean %||% d0$base_mean),
+        svalue = as.numeric(th$svalue %||% d0$svalue)
+      )
+      n <- n + 1L
+    }
+    upset_refresh_n(upset_refresh_n() + 1L)
+    shiny::showNotification(paste("Applied current sidebar thresholds to", n, "DEG list(s). UpSet only."), type = "message")
+  }, ignoreInit = TRUE)
+
+  shiny::observeEvent(input$upset_thr_reset_all, {
+    ov <- shiny::reactiveValuesToList(upset_thr_overrides)
+    for (nm in names(ov)) {
+      upset_thr_overrides[[nm]] <- NULL
+    }
+    upset_refresh_n(upset_refresh_n() + 1L)
+    shiny::showNotification("Cleared all UpSet threshold overrides; lists use YAML defaults.", type = "message")
+  }, ignoreInit = TRUE)
+
+  shiny::observeEvent(input$upset_study, {
+    if (is.null(input$upset_study) || !nzchar(input$upset_study)) return()
+    lists <- study_deg_lists(input$upset_study)
+    if (length(lists) < 1L) {
+      shiny::updateSelectInput(session, "upset_deg_list", choices = c("(no DEG lists)" = ""), selected = "")
+      return()
+    }
+    ch <- stats::setNames(
+      vapply(lists, function(x) x$deg_file, character(1L)),
+      vapply(lists, function(x) x$label, character(1L))
+    )
+    shiny::updateSelectInput(session, "upset_deg_list", choices = ch, selected = lists[[1L]]$deg_file)
+  }, ignoreNULL = FALSE)
+
+  shiny::observeEvent(list(input$upset_study, input$upset_deg_list), {
+    if (is.null(input$upset_study) || !nzchar(input$upset_study)) return()
+    if (is.null(input$upset_deg_list) || !nzchar(input$upset_deg_list)) return()
+    d <- deg_list_threshold_defaults(input$upset_study, input$upset_deg_list)
+    fc <- c(0.001, 0.01, 0.05, 0.1, 0.5)
+    fdr_sel <- if (d$fdr %in% fc) d$fdr else 0.05
+    shiny::updateSelectInput(session, "upset_fdr", selected = fdr_sel)
+    shiny::updateNumericInput(session, "upset_log2fc", value = d$log2fc)
+    if (!is.null(input$upset_base_mean)) {
+      shiny::updateNumericInput(session, "upset_base_mean", value = d$base_mean)
+    }
+    if (!is.null(input$upset_svalue)) {
+      shiny::updateNumericInput(session, "upset_svalue", value = d$svalue)
+    }
+  }, ignoreInit = FALSE)
+
+  output$upset_deg_description <- shiny::renderUI({
+    if (is.null(input$upset_study) || !nzchar(input$upset_study)) return(NULL)
+    if (is.null(input$upset_deg_list) || !nzchar(input$upset_deg_list)) return(NULL)
+    lists <- study_deg_lists(input$upset_study)
+    idx <- match(input$upset_deg_list, vapply(lists, function(x) x$deg_file, character(1L)))
+    desc <- if (!is.na(idx) && !is.null(lists[[idx]]$description)) lists[[idx]]$description else ""
+    if (is.null(desc) || !nzchar(trimws(as.character(desc)))) return(NULL)
+    tags$div(
+      class = "form-group shiny-input-container",
+      tags$label("Description", class = "control-label"),
+      tags$div(desc, class = "text-muted", style = "margin-top: 0.25rem; font-size: 0.9rem;")
+    )
+  })
+
+  output$upset_svalue_sidebar <- shiny::renderUI({
+    shiny::req(input$upset_study, input$upset_deg_list)
+    shiny::req(nzchar(input$upset_study), nzchar(input$upset_deg_list))
+    loaded <- load_study_data(input$upset_study, input$upset_deg_list)
+    res <- loaded$res
+    if (is.null(res) || !("svalue" %in% colnames(res))) return(NULL)
+    d <- deg_list_threshold_defaults(input$upset_study, input$upset_deg_list)
+    val <- if (!is.null(d$svalue)) d$svalue else default_heatmap_thresholds()$svalue
+    numericInput("upset_svalue", label = "Cutoff for svalue:", value = val)
+  })
+
+  output$upset_base_mean_sidebar <- shiny::renderUI({
+    shiny::req(input$upset_study, input$upset_deg_list)
+    shiny::req(nzchar(input$upset_study), nzchar(input$upset_deg_list))
+    loaded <- load_study_data(input$upset_study, input$upset_deg_list)
+    res <- loaded$res
+    if (is.null(res) || !("baseMean" %in% colnames(res))) return(NULL)
+    d <- deg_list_threshold_defaults(input$upset_study, input$upset_deg_list)
+    val <- if (!is.null(d$base_mean)) d$base_mean else default_heatmap_thresholds()$base_mean
+    numericInput("upset_base_mean", label = "Minimal base mean:", value = val)
+  })
+
+  upset_tab_cfg <- shiny::reactive({
+    md <- suppressWarnings(as.numeric(input$upset_max_degree %||% 2))
+    if (length(md) != 1L || is.na(md) || md < 2L) md <- 2
+    rs <- input[["upset-row_sort"]] %||% "study"
+    if (!is.character(rs) || length(rs) != 1L || !nzchar(rs)) rs <- "study"
+    if (identical(rs, "set_size")) rs <- "intersect_max"
+    if (!rs %in% c("study", "intersect_max")) rs <- "study"
+    list(
+      max_degree = md,
+      refresh = upset_refresh_n(),
+      row_sort = rs
+    )
+  })
+
+  upset_thr_sidebar <- shiny::reactive({
+    sid <- input$upset_study %||% ""
+    deg <- input$upset_deg_list %||% ""
+    d0 <- default_heatmap_thresholds()
+    if (!nzchar(sid) || !nzchar(deg)) {
+      return(list(
+        fdr = d0$fdr,
+        log2fc = d0$log2fc,
+        base_mean = d0$base_mean,
+        svalue = d0$svalue
+      ))
+    }
+    d <- deg_list_threshold_defaults(sid, deg)
+    list(
+      fdr = as.numeric(input$upset_fdr %||% d$fdr),
+      log2fc = as.numeric(input$upset_log2fc %||% d$log2fc),
+      base_mean = as.numeric(input$upset_base_mean %||% d$base_mean),
+      svalue = as.numeric(input$upset_svalue %||% d$svalue)
+    )
+  })
+
+  upsetTabServer(
+    "upset",
+    study_ids,
+    stats::setNames(study_labels, study_ids),
+    upset_tab_cfg,
+    upset_thr_overrides
   )
 
   ora_custom_ontology <- shiny::reactiveVal(list(active = FALSE, t2g = NULL))
