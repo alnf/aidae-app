@@ -213,6 +213,18 @@ body <- dashboardBody(
       padding-left: 0;
       margin-left: 0;
     }
+    /* UpSet sidebar section bottom padding only (button widths use inline styles on the control) */
+    .sidebar .upset-sidebar-section,
+    .main-sidebar .upset-sidebar-section,
+    .left-side .upset-sidebar-section {
+      padding-bottom: 2rem;
+    }
+    .sidebar .upset-threshold-actions .btn,
+    .main-sidebar .upset-threshold-actions .btn,
+    .left-side .upset-threshold-actions .btn {
+      width: auto !important;
+      max-width: 100% !important;
+    }
     /* withProgress() bar: default Shiny placement is bottom; anchor to top of viewport */
     .shiny-progress {
       position: fixed !important;
@@ -446,7 +458,7 @@ ui <- secure_app(dashboardPage(
     shiny::conditionalPanel(
       condition = "input.navtabs == 'upset'",
       shiny::tags$div(
-        style = "padding-bottom: 28px;",
+        class = "upset-sidebar-section",
         shiny::tags$div(
           class = "text-muted",
           style = "font-size: 0.82rem; margin-bottom: 8px;",
@@ -464,6 +476,32 @@ ui <- secure_app(dashboardPage(
           max = max(8L, as.integer(n_upset_deg_tasks)),
           step = 1L
         ),
+        shiny::tags$div(
+          class = "text-muted",
+          style = "font-size: 0.78rem; margin: -6px 0 10px 0;",
+          "Mode is always inclusive ",
+          shiny::tags$strong("intersect"),
+          " (not distinct). With max degree 2, every pair of DEG lists gets a column when the pair count is below the app cap; raise degree to include triples etc. (then only observed intersections are listed)."
+        ),
+        selectInput(
+          "upset_min_intersection",
+          label = "Minimum intersection size (genes):",
+          choices = c(
+            "No limit" = 0,
+            "1" = 1,
+            "2" = 2,
+            "5" = 5,
+            "10" = 10,
+            "25" = 25,
+            "50" = 50,
+            "100" = 100,
+            "200" = 200,
+            "500" = 500,
+            "1,000" = 1000
+          ),
+          selected = 0,
+          width = "100%"
+        ),
         selectInput("upset_study", label = "Study (threshold target)", choices = upset_study_choices, selected = default_upset_study),
         selectInput("upset_deg_list", label = "DEG list (threshold target)", choices = default_upset_deg_choices, selected = default_upset_deg),
         uiOutput("upset_deg_description"),
@@ -472,10 +510,39 @@ ui <- secure_app(dashboardPage(
         uiOutput("upset_base_mean_sidebar"),
         numericInput("upset_log2fc", label = "Minimal abs(log2 fold change):", value = default_thr$log2fc),
         shiny::tags$div(
-          style = "display: flex; flex-direction: column; gap: 10px; margin-top: 4px;",
-          shiny::actionButton("upset_refresh", label = "Refresh thresholds for selected list", class = "btn-primary", width = "100%"),
-          shiny::actionButton("upset_thr_apply_all", label = "Apply current thresholds to all lists", class = "btn-secondary", width = "100%"),
-          shiny::actionButton("upset_thr_reset_all", label = "Reset all lists to default thresholds", class = "btn-outline-secondary", width = "100%")
+          class = "form-group upset-threshold-actions",
+          style = paste0(
+            "width:270px;max-width:100%;box-sizing:border-box;",
+            "display:flex;flex-direction:column;gap:6px;",
+            "margin-top:2rem;margin-bottom:1.5rem;margin-right:15px;"
+          ),
+          shiny::tags$div(
+            style = "min-width:0;width:100%;max-width:100%;box-sizing:border-box;overflow:hidden;",
+            shiny::actionButton(
+              "upset_refresh",
+              label = "Refresh thresholds for selected list",
+              class = "btn-primary",
+              style = "margin:6px 15px 6px 15px;box-sizing:border-box;white-space:normal;overflow-wrap:anywhere;word-break:break-word;"
+            )
+          ),
+          shiny::tags$div(
+            style = "min-width:0;width:100%;max-width:100%;box-sizing:border-box;overflow:hidden;",
+            shiny::actionButton(
+              "upset_thr_apply_all",
+              label = "Apply current thresholds to all lists",
+              class = "btn-secondary",
+              style = "margin:6px 15px 6px 15px;box-sizing:border-box;white-space:normal;overflow-wrap:anywhere;word-break:break-word;"
+            )
+          ),
+          shiny::tags$div(
+            style = "min-width:0;width:100%;max-width:100%;box-sizing:border-box;overflow:hidden;",
+            shiny::actionButton(
+              "upset_thr_reset_all",
+              label = "Reset all lists to default thresholds",
+              class = "btn-outline-secondary",
+              style = "margin:6px 15px 6px 15px;box-sizing:border-box;white-space:normal;overflow-wrap:anywhere;word-break:break-word;"
+            )
+          )
         )
       )
     )
@@ -633,8 +700,12 @@ server <- function(input, output, session) {
     if (!is.character(rs) || length(rs) != 1L || !nzchar(rs)) rs <- "study"
     if (identical(rs, "set_size")) rs <- "intersect_max"
     if (!rs %in% c("study", "intersect_max")) rs <- "study"
+    mis <- suppressWarnings(as.numeric(input$upset_min_intersection %||% 0))
+    if (length(mis) != 1L || is.na(mis) || mis < 0) mis <- 0
+    mis <- min(mis, 1e7)
     list(
       max_degree = md,
+      min_intersection = mis,
       refresh = upset_refresh_n(),
       row_sort = rs
     )
@@ -666,7 +737,64 @@ server <- function(input, output, session) {
     study_ids,
     stats::setNames(study_labels, study_ids),
     upset_tab_cfg,
-    upset_thr_overrides
+    upset_thr_overrides,
+    on_dot_click = function(sid, deg, genes) {
+      if (!requireNamespace("shinydashboard", quietly = TRUE)) {
+        return(invisible(NULL))
+      }
+      sid <- as.character(sid %||% "")[[1L]]
+      deg <- as.character(deg %||% "")[[1L]]
+      if (!nzchar(sid) || !nzchar(deg)) return(invisible(NULL))
+      genes <- unique(trimws(as.character(genes)))
+      genes <- genes[nzchar(genes) & !is.na(genes)]
+
+      lists <- study_deg_lists(sid)
+      if (length(lists) < 1L) return(invisible(NULL))
+      choices <- stats::setNames(
+        vapply(lists, function(x) x$deg_file, character(1L)),
+        vapply(lists, function(x) x$label, character(1L))
+      )
+      deg_vals <- unname(choices)
+      if (!deg %in% deg_vals) return(invisible(NULL))
+
+      # pending_deg_list is only consumed in observeEvent(input$study). If the DEGs tab is
+      # already on this study, updateSelectInput(study) is a no-op and the list never switched —
+      # update deg_list here. Cross-study navigation keeps using pending + study observer.
+      cur_study <- as.character(shiny::isolate(input$study %||% ""))[[1L]]
+      same_study <- nzchar(cur_study) && identical(cur_study, sid)
+
+      rv$apply_custom_after_load <- length(genes) > 0L
+      rv$custom_genes <- if (length(genes) > 0L) genes else NULL
+      rv$custom_genes_study <- sid
+
+      shinydashboard::updateTabItems(session, "navtabs", selected = "degs")
+      shiny::updateCheckboxInput(session, "lock_gene_list", value = TRUE)
+
+      if (same_study) {
+        rv$pending_deg_list <- NULL
+        shiny::updateSelectInput(session, "deg_list", choices = choices, selected = deg)
+      } else {
+        rv$pending_deg_list <- deg
+        shiny::updateSelectInput(session, "study", selected = sid)
+      }
+
+      # If study+deg were already correct, neither observer re-runs and apply_custom_after_load
+      # would never be consumed — flush once and apply when data are ready.
+      if (isTRUE(rv$apply_custom_after_load)) {
+        session$onFlushed(function() {
+          if (!isTRUE(shiny::isolate(rv$apply_custom_after_load))) return()
+          if (!identical(as.character(shiny::isolate(input$study) %||% ""), sid)) return()
+          if (!identical(as.character(shiny::isolate(input$deg_list) %||% ""), deg)) return()
+          if (is.null(shiny::isolate(rv$current_res)) || is.null(shiny::isolate(rv$current_mm))) {
+            return()
+          }
+          rv$apply_custom_after_load <- FALSE
+          apply_custom_gene_list(apply_thresholds = TRUE)
+        }, once = TRUE)
+      }
+
+      invisible(NULL)
+    }
   )
 
   ora_custom_ontology <- shiny::reactiveVal(list(active = FALSE, t2g = NULL))
@@ -718,6 +846,8 @@ server <- function(input, output, session) {
     row_index = NULL,
     res_table_row_index = integer(0),
     selected_rows = NULL,
+    pending_deg_list = NULL,
+    apply_custom_after_load = FALSE,
     custom_genes = NULL,
     custom_genes_study = NULL,
     threshold_defaults = default_heatmap_thresholds(),
@@ -1335,7 +1465,15 @@ server <- function(input, output, session) {
     }
     choices <- setNames(vapply(lists, function(x) x$deg_file, character(1L)),
                        vapply(lists, function(x) x$label, character(1L)))
-    updateSelectInput(session, "deg_list", choices = choices, selected = lists[[1L]]$deg_file)
+    pending <- rv$pending_deg_list
+    rv$pending_deg_list <- NULL
+    deg_vals <- unname(choices)
+    sel <- if (!is.null(pending) && nzchar(as.character(pending)) && as.character(pending) %in% deg_vals) {
+      as.character(pending)
+    } else {
+      lists[[1L]]$deg_file
+    }
+    updateSelectInput(session, "deg_list", choices = choices, selected = sel)
   }, ignoreNULL = FALSE)
 
   # Show svalue cutoff only when the loaded DEG table has a svalue column
@@ -1372,12 +1510,16 @@ server <- function(input, output, session) {
 
   # Load data when study or DEG list selection changes (runs on init so default study+list load).
   observeEvent(list(input$study, input$deg_list), {
+    if (is.null(input$study) || input$study == "" || is.null(input$deg_list) || input$deg_list == "") return()
+    lists_chk <- study_deg_lists(input$study)
+    if (length(lists_chk) < 1L) return()
+    deg_ok <- vapply(lists_chk, function(x) x$deg_file, character(1L))
+    if (!input$deg_list %in% deg_ok) return()
     rv$current_res <- NULL
     rv$current_mm <- NULL
     rv$current_col_annot <- NULL
     rv$row_index <- NULL
     rv$selected_rows <- NULL
-    if (is.null(input$study) || input$study == "" || is.null(input$deg_list) || input$deg_list == "") return()
     message("[perf] load_study_data: start; study=", input$study, " deg_list=", input$deg_list)
     loaded <- perf_time("load_study_data", load_study_data(input$study, input$deg_list))
     rv$current_res <- loaded$res
@@ -1406,6 +1548,10 @@ server <- function(input, output, session) {
       grid.newpage()
       grid.text("Click \"Generate heatmap\" to display the heatmap.")
     })
+    if (isTRUE(rv$apply_custom_after_load)) {
+      rv$apply_custom_after_load <- FALSE
+      shiny::isolate(apply_custom_gene_list(apply_thresholds = TRUE))
+    }
   }, ignoreNULL = FALSE, ignoreInit = FALSE)
 
   # Brush action uses current study data from rv

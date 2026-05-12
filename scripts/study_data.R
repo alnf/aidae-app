@@ -40,6 +40,33 @@ study_deg_lists <- function(study_id) {
   study_deg_lists_from_cfg(cfg, study_id)
 }
 
+# ColorBrewer qualitative "Set3" (n <= 12); recycle in order if more studies.
+.study_palette_set3 <- function(n) {
+  n <- max(1L, as.integer(n))
+  base <- c(
+    "#8DD3C7", "#FFFFB3", "#BEBADA", "#FB8072", "#80B1D3", "#FDB462",
+    "#B3DE69", "#FCCDE5", "#D9D9D9", "#BC80BD", "#CCEBC5", "#FFED6F"
+  )
+  if (n <= length(base)) return(base[seq_len(n)])
+  rep(base, length.out = n)
+}
+
+# Named vector: display study label -> hex for UpSet (Set3 by main-config study order).
+study_color_map_for_labels <- function(study_ids, study_labels) {
+  if (is.null(study_ids) || length(study_ids) < 1L) return(character(0))
+  pal <- .study_palette_set3(length(study_ids))
+  names(pal) <- study_ids
+  out <- character(0)
+  for (sid in study_ids) {
+    lab <- study_labels[[sid]]
+    if (is.null(lab) || !nzchar(trimws(as.character(lab)))) lab <- as.character(sid)
+    lab <- trimws(as.character(lab))
+    if (lab %in% names(out)) next
+    out[[lab]] <- pal[[sid]]
+  }
+  out
+}
+
 samples_for_comparison <- function(study_id, label) {
   message("samples_for_comparison entered: study_id=", study_id, " label=", label)
   if (is.null(study_id) || study_id == "" || is.null(label) || label == "") {
