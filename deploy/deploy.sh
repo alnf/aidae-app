@@ -10,6 +10,7 @@
 #   ./deploy/deploy.sh heart --dry-run
 #   ./deploy/deploy.sh heart --verbose    # or -v: bundle step detail + writeManifest(verbose=TRUE)
 #   ./deploy/deploy.sh heart --debug      # implies --verbose; print every bundle path; bash set -x during upload
+#   ./deploy/deploy.sh newstudy --new     # first publish: rsconnect --new (omit deploy.app_id in YAML)
 
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,18 +19,20 @@ cd "$REPO_ROOT"
 DRY_RUN=0
 VERBOSE=0
 DEBUG=0
+NEW_DEPLOY=0
 POS=()
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY_RUN=1 ;;
     --verbose|-v) VERBOSE=1 ;;
     --debug) DEBUG=1; VERBOSE=1 ;;
+    --new) NEW_DEPLOY=1 ;;
     *) POS+=("$a") ;;
   esac
 done
 
 if [[ ${#POS[@]} -lt 1 ]]; then
-  echo "Usage: $0 <deploy/apps/foo.yaml|foo> [--dry-run] [--verbose|-v] [--debug]" >&2
+  echo "Usage: $0 <deploy/apps/foo.yaml|foo> [--dry-run] [--new] [--verbose|-v] [--debug]" >&2
   exit 1
 fi
 
@@ -70,8 +73,12 @@ set -a
 source "$ENV_FILE"
 set +a
 
-if [[ -z "${RSCONNECT_ACCOUNT:-}" || -z "${RSCONNECT_TITLE:-}" || -z "${RSCONNECT_APP_ID:-}" ]]; then
-  echo "deploy block in YAML must set deploy.account, deploy.title, deploy.app_id" >&2
+if [[ -z "${RSCONNECT_ACCOUNT:-}" || -z "${RSCONNECT_TITLE:-}" ]]; then
+  echo "deploy block in YAML must set deploy.account and deploy.title" >&2
+  exit 1
+fi
+if [[ "$NEW_DEPLOY" -eq 0 && -z "${RSCONNECT_APP_ID:-}" ]]; then
+  echo "deploy block in YAML must set deploy.app_id (or pass --new for a first-time publish)" >&2
   exit 1
 fi
 
@@ -80,8 +87,11 @@ if [[ "$DEBUG" -eq 1 ]]; then
   set -x
 fi
 
-rsconnect deploy manifest "$REPO_ROOT/manifest.json" \
-  --name "$RSCONNECT_ACCOUNT" \
-  --title "$RSCONNECT_TITLE" \
-  --app-id "$RSCONNECT_APP_ID" \
-  -v
+RS_EXTRA=(--name "$RSCONNECT_ACCOUNT" --title "$RSCONNECT_TITLE" -v)
+if [[ "$NEW_DEPLOY" -eq 1 ]]; then
+  RS_EXTRA+=(--new)
+else
+  RS_EXTRA+=(--app-id "$RSCONNECT_APP_ID")
+fi
+
+rsconnect deploy manifest "$REPO_ROOT/manifest.json" "${RS_EXTRA[@]}"
