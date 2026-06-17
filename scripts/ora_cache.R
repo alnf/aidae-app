@@ -158,6 +158,7 @@ ora_try_load_per_study_caches <- function(study_ids, pathway_rel_file) {
       ld <- ld[as.character(ld$pathway_file) == as.character(pathway_rel_file), , drop = FALSE]
       ld$pathway_file <- NULL
     }
+    ld <- ora_filter_long_df_to_config_deg_lists(ld, sid)
     long_by_sid[[sid]] <- ld
   }
   list(ok_all = ok_all, long_by_sid = long_by_sid)
@@ -196,6 +197,22 @@ ora_deg_entry_comparison_label <- function(entry) {
   } else {
     basename(as.character(entry$deg_file))
   }
+}
+
+#' Keep only rows for DEG lists currently listed in `data/<study_id>/config.yaml`.
+ora_filter_long_df_to_config_deg_lists <- function(long_df, study_id) {
+  if (is.null(long_df) || !is.data.frame(long_df) || nrow(long_df) < 1L) {
+    return(long_df)
+  }
+  if (!"comparison" %in% colnames(long_df)) {
+    return(long_df)
+  }
+  lists <- study_deg_lists(study_id)
+  if (length(lists) < 1L) {
+    return(long_df[integer(0), , drop = FALSE])
+  }
+  allowed <- unique(vapply(lists, ora_deg_entry_comparison_label, character(1L)))
+  long_df[as.character(long_df$comparison) %in% allowed, , drop = FALSE]
 }
 
 #' Resolve ORA parallel worker count (cap by cores and task count).

@@ -64,3 +64,4 @@ rsconnect.sh
 *.code-workspace
 config.yaml
 deploy/apps/*
+AGENTS.md

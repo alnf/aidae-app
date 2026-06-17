@@ -47,6 +47,15 @@ You need the **rsconnect** R package for `deploy/write_manifest.R`. The first ru
 
 The dashboard is not shipped as a formal R package (there is no `DESCRIPTION`), so dependencies are listed here.
 
+To install missing packages with CRAN/Bioconductor split and parallel compilation:
+
+```bash
+Rscript scripts/install_r_deps.R          # install missing only
+Rscript scripts/install_r_deps.R --check  # list missing, no install
+```
+
+On a fresh Linux system, install the system libraries listed in the header comment of [`scripts/install_r_deps.R`](scripts/install_r_deps.R) before running the script.
+
 ### Required for the main app
 
 These are loaded from `app.R` and are needed for heatmaps, tables, layout, and authentication:

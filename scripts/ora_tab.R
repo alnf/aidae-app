@@ -82,6 +82,46 @@
   0.65
 }
 
+#' Facet strip order: one label per `study_ids` entry from plotted data (not config names alone).
+.ora_facet_study_label_levels <- function(combined_df, study_ids, study_labels) {
+  if (is.null(combined_df) || nrow(combined_df) < 1L || !"study_id" %in% colnames(combined_df)) {
+    return(character(0))
+  }
+  lvls <- vapply(study_ids, function(sid) {
+    sub <- combined_df[as.character(combined_df$study_id) == as.character(sid), , drop = FALSE]
+    if (nrow(sub) < 1L) {
+      return(NA_character_)
+    }
+    lbls <- unique(as.character(sub$study_label))
+    lbls <- lbls[!is.na(lbls) & nzchar(lbls)]
+    if (length(lbls) < 1L) {
+      return(NA_character_)
+    }
+    lbls[[1L]]
+  }, character(1L))
+  lvls <- lvls[!is.na(lvls) & nzchar(lvls)]
+  if (length(lvls) > 0L) {
+    return(lvls)
+  }
+  all_lbls <- vapply(study_ids, function(sid) {
+    lbl <- study_labels[[sid]]
+    if (is.null(lbl) || !nzchar(as.character(lbl))) as.character(sid) else as.character(lbl)
+  }, character(1L))
+  present <- unique(as.character(combined_df$study_label))
+  all_lbls[all_lbls %in% present]
+}
+
+.ora_comp_per_panel_for_levels <- function(combined_df, study_label_levels, min_slots = 3L) {
+  min_slots <- max(1L, as.integer(min_slots))
+  vapply(study_label_levels, function(lbl) {
+    sub <- combined_df[as.character(combined_df$study_label) == as.character(lbl), , drop = FALSE]
+    if (nrow(sub) < 1L) {
+      return(min_slots)
+    }
+    max(min_slots, length(unique(as.character(sub$comparison))))
+  }, integer(1L))
+}
+
 .ora_add_facet_spacers <- function(plot_df, min_slots = 3L) {
   if (is.null(plot_df) || nrow(plot_df) < 1L) return(plot_df)
   if (!("study_label" %in% colnames(plot_df)) || !("comparison" %in% colnames(plot_df))) return(plot_df)
@@ -173,41 +213,185 @@
   out
 }
 
-# Pixel size for Shiny renderPlot: total width = sum of per-study panel widths (matches facet_grid space = "free_x").
-.ora_faceted_plot_dims <- function(comp_per_panel, max_path, panel_labels = NULL) {
-  np <- max(1L, as.integer(max_path))
-  if (length(comp_per_panel) < 1L) {
-    return(list(width = 520L, height = 340L))
-  }
-  w_body <- 0L
-  for (i in seq_along(comp_per_panel)) {
-    nc <- comp_per_panel[[i]]
-    nc <- max(1L, as.integer(nc))
-    # Concave non-linear growth:
-    # - noticeably wider when nc is small (1-3 comparisons)
-    # - slower growth for larger nc to avoid over-expanding dense facets
-    panel_width <- max(138L, round(84 + 106 * log1p(nc)))
-    if (!is.null(panel_labels) && length(panel_labels) >= i) {
-      lbl <- as.character(panel_labels[[i]])
-      if (!is.na(lbl) && nzchar(lbl)) {
-        # Ensure narrow facets can still host long study names in strip labels.
-        chars <- nchar(lbl, type = "width")
-        wrapped_lines <- max(1L, ceiling(chars / 9))
-        # Reserve width for long labels, but avoid exploding total plot width.
-        panel_width <- max(panel_width, 74L + 7L * min(34L, chars) + 7L * (wrapped_lines - 1L))
-      }
+.ORA_DOTPLOT_Y_WRAP <- 38L
+.ORA_DOTPLOT_X_WRAP <- 14L
+
+.ora_dotplot_wrap_label <- function(labels, width) {
+  labs <- as.character(labels)
+  vapply(labs, function(lbl) {
+    if (is.na(lbl) || !nzchar(lbl)) {
+      return(lbl)
     }
-    w_body <- w_body + panel_width
+    parts <- strwrap(lbl, width = max(8L, as.integer(width)))
+    if (length(parts) < 1L) lbl else paste(parts, collapse = "\n")
+  }, character(1L))
+}
+
+.ora_dotplot_min_spacer_slots <- function(comp_per_panel) {
+  cps <- suppressWarnings(as.integer(comp_per_panel))
+  cps <- cps[!is.na(cps) & cps >= 1L]
+  if (length(cps) < 1L) {
+    return(3L)
   }
-  # Stronger compression when many facets are present.
-  n_facets <- length(comp_per_panel)
-  compress <- if (n_facets <= 2L) 1 else max(0.64, 1 - 0.085 * (n_facets - 2L))
-  w <- min(4200L, max(420L, 130L + round(w_body * compress)))
-  # Sublinear height scaling to avoid excessive trailing whitespace for large pathway sets.
-  npf <- as.numeric(np)
-  h <- 320 + 26 * (npf^0.88) + 7 * log1p(npf)
-  h <- min(5200L, max(420L, round(h)))
-  list(width = w, height = h)
+  if (min(cps) >= 4L) {
+    return(1L)
+  }
+  3L
+}
+
+.ora_dotplot_y_text_size <- function(n_pathways) {
+  n <- suppressWarnings(as.integer(n_pathways))
+  if (is.na(n) || n < 1L) {
+    return(10)
+  }
+  sz <- 10.5 - 2.5 * log1p(max(0, n - 1L) / 18)
+  max(7.5, min(10.5, sz))
+}
+
+.ora_dotplot_pathway_levels <- function(combined_df, pathway_level_order = NULL) {
+  if (!is.null(pathway_level_order) && length(pathway_level_order) > 0L) {
+    lvls <- as.character(pathway_level_order)
+  } else if (!is.null(combined_df) && nrow(combined_df) > 0L && "Description" %in% colnames(combined_df)) {
+    lvls <- unique(as.character(combined_df$Description))
+  } else {
+    lvls <- character(0)
+  }
+  lvls <- lvls[!is.na(lvls) & nzchar(lvls)]
+  lvls
+}
+
+#' Component-based pixel size for the ORA faceted dot plot (scroll container can grow).
+ora_dotplot_layout_metrics <- function(
+    combined_df,
+    study_ids,
+    study_labels,
+    pathway_level_order = NULL) {
+  empty <- list(
+    width = 520L,
+    height = 340L,
+    comp_per_panel = integer(0),
+    n_pathways = 0L,
+    n_facets = 0L
+  )
+  if (is.null(combined_df) || nrow(combined_df) < 1L) {
+    return(empty)
+  }
+
+  study_label_levels <- .ora_facet_study_label_levels(combined_df, study_ids, study_labels)
+  if (length(study_label_levels) < 1L) {
+    return(empty)
+  }
+
+  comp_per_panel <- .ora_comp_per_panel_for_levels(combined_df, study_label_levels, min_slots = 1L)
+  names(comp_per_panel) <- study_label_levels
+
+  pathway_labels <- .ora_dotplot_pathway_levels(combined_df, pathway_level_order)
+  n_pathways <- length(pathway_labels)
+  wrapped_y <- .ora_dotplot_wrap_label(pathway_labels, .ORA_DOTPLOT_Y_WRAP)
+  max_wrapped_y_chars <- if (length(wrapped_y) > 0L) {
+    max(nchar(wrapped_y, type = "width"), na.rm = TRUE)
+  } else {
+    0L
+  }
+  max_y_lines <- if (length(wrapped_y) > 0L) {
+    max(vapply(strsplit(wrapped_y, "\n", fixed = TRUE), length, integer(1L)), na.rm = TRUE)
+  } else {
+    1L
+  }
+
+  y_reserve <- as.integer(round(12 + 6.5 * min(48L, max_wrapped_y_chars)))
+
+  facet_w <- integer(0)
+  max_cmp_chars <- 0L
+  for (lbl in study_label_levels) {
+    sub <- combined_df[as.character(combined_df$study_label) == as.character(lbl), , drop = FALSE]
+    n_cmp <- as.integer(comp_per_panel[[as.character(lbl)]])
+    if (is.na(n_cmp) || n_cmp < 1L) {
+      n_cmp <- 1L
+    }
+    cmps <- character(0)
+    if (nrow(sub) > 0L && "comparison" %in% colnames(sub)) {
+      cmps <- unique(as.character(sub$comparison))
+      cmps <- cmps[!is.na(cmps) & nzchar(cmps)]
+    }
+    cmp_chars <- if (length(cmps) > 0L) max(nchar(cmps, type = "width"), na.rm = TRUE) else 0L
+    max_cmp_chars <- max(max_cmp_chars, cmp_chars)
+    fw <- max(120L, as.integer(round(36 + 58 * n_cmp + 0.35 * max(0, cmp_chars - 18))))
+    strip_chars <- nchar(as.character(lbl), type = "width")
+    strip_lines <- max(1L, ceiling(strip_chars / 9))
+    fw <- max(fw, as.integer(74 + 7 * min(34L, strip_chars) + 7 * (strip_lines - 1L)))
+    facet_w <- c(facet_w, fw)
+  }
+
+  width <- as.integer(min(9000L, max(380L, y_reserve + sum(facet_w) + 110L)))
+
+  row_pitch <- if (n_pathways <= 12L) {
+    30L
+  } else if (n_pathways <= 25L) {
+    27L
+  } else {
+    24L
+  }
+  if (max_y_lines > 1L) {
+    row_pitch <- row_pitch + as.integer(8 * (max_y_lines - 1L))
+  }
+
+  strip_h <- 28L
+  if (length(study_label_levels) > 0L) {
+    wrapped_strips <- .ora_wrap_strip_text(study_label_levels, width = 9L)
+    max_strip_lines <- max(
+      vapply(strsplit(wrapped_strips, "\n", fixed = TRUE), length, integer(1L)),
+      na.rm = TRUE
+    )
+    strip_h <- as.integer(20 + 14 * max_strip_lines)
+  }
+
+  x_reserve <- as.integer(round(40 + 0.55 * max_cmp_chars))
+  height <- as.integer(min(8000L, max(360L, 120L + strip_h + x_reserve + n_pathways * row_pitch)))
+
+  list(
+    width = width,
+    height = height,
+    comp_per_panel = comp_per_panel,
+    n_pathways = n_pathways,
+    n_facets = length(study_label_levels),
+    row_pitch = row_pitch,
+    y_text_size = .ora_dotplot_y_text_size(n_pathways)
+  )
+}
+
+.ora_dotplot_prepare_faceted_df <- function(combined_df, study_label_levels, pathway_level_order = NULL) {
+  plot_df <- combined_df
+  plot_df$study_label <- factor(as.character(plot_df$study_label), levels = study_label_levels)
+  comp_per_panel <- .ora_comp_per_panel_for_levels(combined_df, study_label_levels, min_slots = 1L)
+  names(comp_per_panel) <- study_label_levels
+  min_slots <- .ora_dotplot_min_spacer_slots(comp_per_panel)
+
+  raw_levels <- .ora_dotplot_pathway_levels(combined_df, pathway_level_order)
+  wrapped_levels <- .ora_dotplot_wrap_label(raw_levels, .ORA_DOTPLOT_Y_WRAP)
+  names(wrapped_levels) <- raw_levels
+
+  plot_df$pathway_desc_raw <- as.character(plot_df$Description)
+  plot_df$comparison <- as.character(plot_df$comparison)
+  plot_df$comparison_display <- .ora_dotplot_wrap_label(plot_df$comparison, .ORA_DOTPLOT_X_WRAP)
+  plot_df <- .ora_add_facet_spacers(plot_df, min_slots = min_slots)
+
+  desc_wrapped <- wrapped_levels[plot_df$pathway_desc_raw]
+  desc_wrapped[is.na(desc_wrapped)] <- plot_df$pathway_desc_raw[is.na(desc_wrapped)]
+  plot_df$Description <- factor(desc_wrapped, levels = wrapped_levels)
+
+  cmp_slot_map <- stats::setNames(
+    as.character(plot_df$comparison_display),
+    as.character(plot_df$comparison_slot)
+  )
+
+  list(
+    plot_df = plot_df,
+    cmp_slot_map = cmp_slot_map,
+    comp_per_panel = comp_per_panel,
+    n_pathways = length(raw_levels),
+    y_text_size = .ora_dotplot_y_text_size(length(raw_levels))
+  )
 }
 
 # Non-linear height scaling for row-intent (pathway genes) heatmaps.
@@ -253,36 +437,12 @@
   if (is.null(combined_df) || nrow(combined_df) < 1L) {
     return(.ora_msg_plot("No pathways to display."))
   }
-  combined_df$study_label <- factor(
-    as.character(combined_df$study_label),
-    levels = study_label_levels
-  )
 
-  plot_df <- combined_df
-  # Character (not one global factor) so each facet's discrete x length = that study's DEG lists only
-  # (needed for facet_grid(space = "free_x") panel widths).
-  comp_per_panel <- vapply(
-    split(as.character(combined_df$comparison), as.character(combined_df$study_label)),
-    function(x) length(unique(x)),
-    integer(1L)
-  )
-  plot_df$comparison <- as.character(plot_df$comparison)
-  plot_df <- .ora_add_facet_spacers(plot_df, min_slots = 3L)
-  cmp_slot_map <- stats::setNames(
-    as.character(plot_df$comparison_display),
-    as.character(plot_df$comparison_slot)
-  )
-
-  if (!is.null(pathway_level_order) && length(pathway_level_order) > 0L) {
-    plot_df$Description <- factor(as.character(plot_df$Description), levels = pathway_level_order)
-  } else {
-    y_levels <- if (is.factor(plot_df$Description)) {
-      levels(plot_df$Description)
-    } else {
-      unique(as.character(plot_df$Description))
-    }
-    plot_df$Description <- factor(as.character(plot_df$Description), levels = y_levels)
-  }
+  prep <- .ora_dotplot_prepare_faceted_df(combined_df, study_label_levels, pathway_level_order)
+  plot_df <- prep$plot_df
+  cmp_slot_map <- prep$cmp_slot_map
+  comp_per_panel <- prep$comp_per_panel
+  y_text_size <- prep$y_text_size
 
   facet_obj <- if (requireNamespace("ggh4x", quietly = TRUE)) {
     strip_sizes <- .ora_strip_text_sizes(study_label_levels, base_size = 12.5, comp_per_panel = comp_per_panel)
@@ -363,7 +523,7 @@
       panel.spacing.x = grid::unit(12, "pt"),
       axis.title.x = ggplot2::element_text(size = 12),
       axis.text.x = ggplot2::element_text(angle = 40, hjust = 1, size = 11),
-      axis.text.y = ggplot2::element_text(size = 10),
+      axis.text.y = ggplot2::element_text(size = y_text_size),
       legend.text = ggplot2::element_text(size = 10.5),
       legend.title = ggplot2::element_text(size = 11)
     )
@@ -376,34 +536,19 @@
   if (is.null(combined_df) || nrow(combined_df) < 1L) {
     return(.ora_msg_plot("No pathways to display."))
   }
-  plot_df <- combined_df
-  comp_per_panel <- vapply(
-    split(as.character(combined_df$comparison), as.character(combined_df$study_label)),
-    function(x) length(unique(x)),
-    integer(1L)
-  )
-  plot_df$study_label <- factor(
-    as.character(plot_df$study_label),
-    levels = study_label_levels
-  )
-  plot_df$comparison <- as.character(plot_df$comparison)
-  plot_df <- .ora_add_facet_spacers(plot_df, min_slots = 3L)
-  cmp_slot_map <- stats::setNames(
-    as.character(plot_df$comparison_display),
-    as.character(plot_df$comparison_slot)
-  )
-  if (!is.null(pathway_level_order) && length(pathway_level_order) > 0L) {
-    plot_df$Description <- factor(as.character(plot_df$Description), levels = pathway_level_order)
-  } else {
-    y_levels <- unique(as.character(plot_df$Description))
-    plot_df$Description <- factor(as.character(plot_df$Description), levels = y_levels)
-  }
+
+  prep <- .ora_dotplot_prepare_faceted_df(combined_df, study_label_levels, pathway_level_order)
+  plot_df <- prep$plot_df
+  cmp_slot_map <- prep$cmp_slot_map
+  comp_per_panel <- prep$comp_per_panel
+  y_text_size <- prep$y_text_size
+
   plot_df$selection_id <- paste(
     as.character(plot_df$study_id),
     as.character(plot_df$study_label),
     as.character(plot_df$comparison),
     as.character(plot_df$ID),
-    as.character(plot_df$Description),
+    as.character(plot_df$pathway_desc_raw),
     sep = "|||"
   )
   p_raw <- if ("pvalue" %in% colnames(plot_df)) {
@@ -428,7 +573,7 @@
   plot_df$tooltip <- paste0(
     "<b>Study:</b> ", as.character(plot_df$study_label),
     "<br><b>Comparison:</b> ", as.character(plot_df$comparison_display),
-    "<br><b>Pathway:</b> ", as.character(plot_df$Description),
+    "<br><b>Pathway:</b> ", as.character(plot_df$pathway_desc_raw),
     "<br><b>Count:</b> ", as.character(plot_df$Count),
     "<br><b>Gene ratio:</b> ", formatC(as.numeric(plot_df$gene_ratio), digits = 3, format = "f"),
     "<br><b>P-value:</b> ", p_raw_lbl,
@@ -517,7 +662,7 @@
       panel.spacing.x = grid::unit(12, "pt"),
       axis.title.x = ggplot2::element_text(size = 12),
       axis.text.x = ggplot2::element_text(angle = 40, hjust = 1, size = 11),
-      axis.text.y = ggplot2::element_text(size = 10),
+      axis.text.y = ggplot2::element_text(size = y_text_size),
       legend.text = ggplot2::element_text(size = 10.5),
       legend.title = ggplot2::element_text(size = 11)
     )
@@ -1452,7 +1597,7 @@ oraTabUI <- function(id, study_ids, study_labels, ora_file_choices, pathway_defa
             shiny::uiOutput(ns("ora_assay_legend_ui")),
         shiny::tags$div(
           class = "ora-plot-wrap",
-          style = "overflow-x: auto; width: 100%; max-width: 100%; min-width: 0;",
+          style = "overflow: auto; max-height: 85vh; width: 100%; max-width: 100%; min-width: 0;",
           shiny::tags$div(
             style = "display: inline-block; vertical-align: top; max-width: none;",
             shiny::uiOutput(ns("ora_plot_all_ui"))
@@ -1858,25 +2003,23 @@ oraTabServer <- function(
       list(error = NULL, combined = combined, ob = ob)
     })
 
+    ora_dotplot_dims <- shiny::reactive({
+      d <- ora_combined_plot_df()
+      if (!is.null(d$error) || is.null(d$combined) || nrow(d$combined) < 1L) {
+        return(.ora_msg_plot_px())
+      }
+      m <- ora_dotplot_layout_metrics(
+        d$combined,
+        study_ids,
+        study_labels,
+        d$ob$pathway_level_order
+      )
+      list(width = m$width, height = m$height)
+    })
+
     output$ora_plot_all_ui <- shiny::renderUI({
       d <- ora_combined_plot_df()
-      comp_per_panel <- integer(0)
-      panel_labels <- character(0)
-      max_path <- 1L
-      if (!is.null(d$combined) && nrow(d$combined) > 0L) {
-        for (sid in study_ids) {
-          sub <- d$combined[as.character(d$combined$study_id) == sid, , drop = FALSE]
-          if (nrow(sub) < 1L) next
-          comp_per_panel <- c(comp_per_panel, max(3L, length(unique(as.character(sub$comparison)))))
-          panel_labels <- c(panel_labels, unique(as.character(sub$study_label))[[1L]])
-          max_path <- max(max_path, length(unique(as.character(sub$ID))))
-        }
-      }
-      dims <- if (length(comp_per_panel) > 0L) {
-        .ora_faceted_plot_dims(comp_per_panel, max_path, panel_labels = panel_labels)
-      } else {
-        .ora_msg_plot_px()
-      }
+      dims <- ora_dotplot_dims()
       has_real_dotplot <- is.null(d$error) && !is.null(d$combined) && nrow(d$combined) > 0L
       if (requireNamespace("ggiraph", quietly = TRUE) && has_real_dotplot) {
         ggiraph::girafeOutput(session$ns("ora_plot_all"), width = paste0(dims$width, "px"), height = paste0(dims$height, "px"))
@@ -1888,29 +2031,11 @@ oraTabServer <- function(
     if (requireNamespace("ggiraph", quietly = TRUE)) {
       output$ora_plot_all <- ggiraph::renderGirafe({
         d <- ora_combined_plot_df()
-        comp_per_panel <- integer(0)
-        panel_labels <- character(0)
-        max_path <- 1L
-        if (!is.null(d$combined) && nrow(d$combined) > 0L) {
-          for (sid in study_ids) {
-            sub <- d$combined[as.character(d$combined$study_id) == sid, , drop = FALSE]
-            if (nrow(sub) < 1L) next
-            comp_per_panel <- c(comp_per_panel, max(3L, length(unique(as.character(sub$comparison)))))
-            panel_labels <- c(panel_labels, unique(as.character(sub$study_label))[[1L]])
-            max_path <- max(max_path, length(unique(as.character(sub$ID))))
-          }
-        }
-        dims <- if (length(comp_per_panel) > 0L) {
-          .ora_faceted_plot_dims(comp_per_panel, max_path, panel_labels = panel_labels)
-        } else {
-          .ora_msg_plot_px()
-        }
+        dims <- ora_dotplot_dims()
         if (!is.null(d$error)) {
           gp <- .ora_msg_plot(d$error)
         } else {
-          all_lbls <- vapply(study_ids, study_label_for, character(1L))
-          present <- unique(as.character(d$combined$study_label))
-          study_label_levels <- all_lbls[all_lbls %in% present]
+          study_label_levels <- .ora_facet_study_label_levels(d$combined, study_ids, study_labels)
           gp <- tryCatch(
             .ora_faceted_comparison_plot_girafe(
               d$combined,
@@ -1946,13 +2071,12 @@ oraTabServer <- function(
     output$ora_plot_all_fallback <- shiny::renderPlot(
       {
         d <- ora_combined_plot_df()
+        dims <- ora_dotplot_dims()
         if (!is.null(d$error)) {
           return(.ora_msg_plot(d$error))
         }
         combined <- d$combined
-        all_lbls <- vapply(study_ids, study_label_for, character(1L))
-        present <- unique(as.character(combined$study_label))
-        study_label_levels <- all_lbls[all_lbls %in% present]
+        study_label_levels <- .ora_facet_study_label_levels(combined, study_ids, study_labels)
 
         tryCatch(
           .ora_faceted_comparison_plot(
