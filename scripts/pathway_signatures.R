@@ -224,30 +224,126 @@ parse_ontology_xlsx_for_ora <- function(path) {
     }
   }
 
+  .ontology_syms_cats_to_t2g(syms, cats, swapped = swapped_by_heuristic)
+}
+
+#' @return Named character vector: preset label -> path under repo root.
+bundled_ontology_presets <- function() {
+  c(
+    "galectins.xlsx" = "databases/galectins.xlsx",
+    "gene_categories.tsv" = "databases/gene_categories.tsv"
+  )
+}
+
+#' Load a bundled ontology preset from [bundled_ontology_presets()].
+load_bundled_ontology <- function(preset_name) {
+  presets <- bundled_ontology_presets()
+  if (is.null(preset_name) || !nzchar(as.character(preset_name))) {
+    return(list(ok = FALSE, error = "No preset selected.", t2g = NULL, source = NULL))
+  }
+  preset_name <- as.character(preset_name)
+  if (!preset_name %in% names(presets)) {
+    return(list(ok = FALSE, error = paste0("Unknown ontology preset: ", preset_name), t2g = NULL, source = NULL))
+  }
+  path <- presets[[preset_name]]
+  pr <- parse_ontology_file_for_ora(path)
+  if (!isTRUE(pr$ok)) return(pr)
+  pr$source <- preset_name
+  pr
+}
+
+#' Parse `.tsv` / tab-separated ontology (`gene`/`symbol` + `category` columns).
+parse_ontology_tsv_for_ora <- function(path) {
+  if (is.null(path) || !nzchar(as.character(path)) || !file.exists(as.character(path))) {
+    return(list(ok = FALSE, error = "File not found.", t2g = NULL))
+  }
+  raw <- tryCatch(
+    read.table(path, sep = "\t", header = TRUE, check.names = FALSE, quote = "", comment.char = "", stringsAsFactors = FALSE),
+    error = function(e) NULL
+  )
+  if (is.null(raw) || nrow(raw) < 1L) {
+    return(list(ok = FALSE, error = "Empty or unreadable .tsv.", t2g = NULL))
+  }
+  if (ncol(raw) < 2L) {
+    return(list(ok = FALSE, error = "Need at least two columns (symbol, category).", t2g = NULL))
+  }
+  nm <- tolower(trimws(as.character(names(raw))))
+  has_sym_name <- any(nm %in% c("symbol", "gene"))
+  has_cat_name <- any(nm %in% c("category", "pathway"))
+  sym_idx <- if (any(nm == "symbol")) which(nm == "symbol")[[1L]] else if (any(nm == "gene")) which(nm == "gene")[[1L]] else 1L
+  cat_idx <- if (any(nm == "category")) which(nm == "category")[[1L]] else if (any(nm == "pathway")) which(nm == "pathway")[[1L]] else 2L
+  if (sym_idx > ncol(raw) || cat_idx > ncol(raw) || sym_idx == cat_idx) {
+    sym_idx <- 1L
+    cat_idx <- 2L
+  }
+  syms <- as.character(raw[[sym_idx]])
+  cats <- as.character(raw[[cat_idx]])
+  syms <- gsub("\u00A0", " ", syms, fixed = TRUE)
+  syms <- gsub("\u200B", "", syms, fixed = TRUE)
+  cats <- gsub("\u00A0", " ", cats, fixed = TRUE)
+  cats <- gsub("\u200B", "", cats, fixed = TRUE)
+  syms <- trimws(syms)
+  cats <- trimws(cats)
+  swapped_by_heuristic <- FALSE
+  if (!has_sym_name && !has_cat_name) {
+    score_symbol_like <- function(v) {
+      v <- trimws(as.character(v))
+      v <- v[!is.na(v) & nzchar(v)]
+      if (length(v) < 1L) return(0)
+      mean(grepl("^[A-Za-z0-9._-]+$", v) & nchar(v) <= 30)
+    }
+    s1 <- score_symbol_like(syms)
+    s2 <- score_symbol_like(cats)
+    u1 <- length(unique(syms[!is.na(syms) & nzchar(syms)]))
+    u2 <- length(unique(cats[!is.na(cats) & nzchar(cats)]))
+    if ((s2 > s1 + 0.18 && u2 > u1) || (u1 <= 3L && u2 > u1)) {
+      tmp <- syms
+      syms <- cats
+      cats <- tmp
+      swapped_by_heuristic <- TRUE
+    }
+  }
+  .ontology_syms_cats_to_t2g(syms, cats, swapped = swapped_by_heuristic)
+}
+
+#' Parse ontology from path by extension (`.xlsx` or `.tsv`/`.txt`).
+parse_ontology_file_for_ora <- function(path) {
+  if (is.null(path) || !nzchar(as.character(path)) || !file.exists(as.character(path))) {
+    return(list(ok = FALSE, error = "File not found.", t2g = NULL))
+  }
+  ext <- tolower(tools::file_ext(path))
+  if (ext %in% c("xlsx", "xls")) {
+    return(parse_ontology_xlsx_for_ora(path))
+  }
+  if (ext %in% c("tsv", "txt", "csv")) {
+    return(parse_ontology_tsv_for_ora(path))
+  }
+  parse_ontology_xlsx_for_ora(path)
+}
+
+.ontology_syms_cats_to_t2g <- function(syms, cats, swapped = FALSE) {
   ok_row <- !is.na(syms) & nzchar(syms) & !is.na(cats) & nzchar(cats)
   syms <- syms[ok_row]
   cats <- cats[ok_row]
   if (length(syms) < 1L) {
-    return(list(ok = FALSE, error = "No valid symbol/category rows.", t2g = NULL, swapped = swapped_by_heuristic))
+    return(list(ok = FALSE, error = "No valid symbol/category rows.", t2g = NULL, swapped = swapped))
   }
   gene <- toupper(syms)
-  # Remove any remaining whitespace in symbols (gene symbols should not contain spaces).
   gene <- gsub("\\s+", "", gene, perl = TRUE)
   ok_g <- nzchar(gene)
   gene <- gene[ok_g]
   cats <- cats[ok_g]
   if (length(gene) < 1L) {
-    return(list(ok = FALSE, error = "No valid gene symbols after normalisation.", t2g = NULL, swapped = swapped_by_heuristic))
+    return(list(ok = FALSE, error = "No valid gene symbols after normalisation.", t2g = NULL, swapped = swapped))
   }
-  # Categories as provided (trimmed only); first-occurrence order via factor then character.
   term <- as.character(factor(cats, levels = unique(cats)))
   t2g <- data.frame(term = term, gene = gene, stringsAsFactors = FALSE)
   t2g <- t2g[!duplicated(paste(t2g$term, t2g$gene, sep = "\t")), , drop = FALSE]
   rownames(t2g) <- NULL
   if (nrow(t2g) < 1L) {
-    return(list(ok = FALSE, error = "No gene–category pairs after cleaning.", t2g = NULL, swapped = swapped_by_heuristic))
+    return(list(ok = FALSE, error = "No gene–category pairs after cleaning.", t2g = NULL, swapped = swapped))
   }
-  list(ok = TRUE, error = NULL, t2g = t2g, swapped = swapped_by_heuristic)
+  list(ok = TRUE, error = NULL, t2g = t2g, swapped = swapped)
 }
 
 #' Read a pathway file into a long data.frame with columns term, gene.

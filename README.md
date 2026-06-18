@@ -24,6 +24,26 @@ For the Gene tab:
 - if top-level `counts_file` exists and is valid, the app uses that single matrix for the study;
 - otherwise the app groups DEG lists by resolved count matrix and renders one plot panel per unique matrix (panel title is DEG `label` list joined with commas).
 
+### Panels tab
+
+Category-annotated **expression** heatmaps (row z-scores) for genes defined in a shared **gene ontology** file. The same ontology is used on the **ORA** tab for custom enrichment.
+
+- **Ontology (sidebar, ORA + Panels):** optional custom `.xlsx` / `.tsv` upload (`symbol`/`gene` + `category` columns). Nothing is loaded until you choose a file and click **Load ontology**.
+- **Study selector (sidebar):** choose study, expression matrix, region (when applicable), then **Generate panel heatmap**.
+- **Toolbar (above plot):** deduplicate, clustering, gene names, **Significant genes only** (uses study `gdegs`; expand cutoffs for FDR / |log2FC|), and **Update heatmap**.
+- **Row layout:** category colour strip on the left with a **legend** (no split-header labels); genes ordered/clustered within category. Optional duplicate rows when a gene appears in multiple categories.
+- **Columns:** samples for one region/facet level when metadata has `Region` or study `gene_tab_facet` (e.g. LV or RV, not all at once); otherwise all samples. Grouped by `PhenoNames` with clustering within each phenotype.
+- **From ORA:** with custom ontology loaded, dot-click in **Comparison (column intent)** mode shows **Open expression panel** to jump to Panels for that study.
+
+### Config tab
+
+Session-wide visibility toggles for studies and individual DEG lists (checkbox tree: study → DEG lists).
+
+- **Available scope** is still defined by the main `config.yaml` `studies:` list and each study’s `deg_lists` in `data/<study_id>/config.yaml` (deploy/admin control).
+- **Visible scope** is chosen on the **Config** tab and applies for the current browser session only (not saved to YAML).
+- Unchecked studies or DEG lists are hidden from **ORA**, **UpSet**, **Gene** (sections and gene search), and sidebar study / DEG list dropdowns (Info, DEGs, Panels, UpSet threshold targets).
+- Use **Select all**, **Deselect all**, or **Reset to defaults** to bulk-update checkboxes. Unchecking a study clears its DEG list checkboxes; checking a study selects all of its lists.
+
 ## Posit Connect deploy
 
 Per-app definitions live under [`deploy/apps/`](deploy/apps/) as YAML. **Real files** such as `all.yaml`, `heart.yaml`, and `placenta.yaml` are **gitignored** because they include Posit Connect identifiers (`deploy.account`, `deploy.title`, `deploy.app_id`). In git you only have **templates**: `all.example.yaml`, `heart.example.yaml`, `placenta.example.yaml` (placeholders, safe to commit). Locally, copy a template to the real name and fill in `deploy:`:
@@ -121,6 +141,20 @@ Sidebar filters for ORA include minimum overlap count, minimum pathway size, min
 - **Heavy / light ontology buckets (`databases/pathways_list.yaml`):** optional keys `pathways_heavy` and `pathways_list` define the master list; **`--light`** runs `setdiff(pathways_list, pathways_heavy)` (or explicit `pathways_light` if set), **`--heavy`** runs `pathways_heavy` only. Logs include **`[ontology-done]`** / **`[deg-round]`** timings for profiling.
 
 Per-step Shiny progress updates run only in single-core mode; with parallel ORA the progress bar advances once when the parallel phase finishes. **`--cores 1`** forces sequential precompute and overrides `EXPRS_ORA_WORKERS` for that run. R/BLAS may still use extra threads per process unless you set **`OMP_NUM_THREADS=1`** (and similar), so `htop` can show more busy CPUs than the ORA worker count.
+
+**ORA tab load cache (Shiny session):** the app keeps an **in-memory cache** for the Shiny session (deserialized RDS per file path + filtered slices per ontology). Switching back to an ontology you already opened avoids repeated disk I/O. Restart the app or update `enrichment.rds` / shard files on disk to clear the cache.
+
+**Per-ontology shards (optional, faster cold load):** beside monolithic `data/<study>/ora/enrichment.rds`, you can add `data/<study>/ora/enrichment/<pathway_basename>.rds` (one ontology per file). The app **reads shards first**, then falls back to the monolith. `scripts/precompute_ora.R` writes shards when it updates the monolith; existing monoliths can be split without re-running enricher:
+
+```bash
+Rscript scripts/split_ora_enrichment.R              # all studies in config.yaml
+Rscript scripts/split_ora_enrichment.R --study dTGR
+Rscript scripts/split_ora_enrichment.R --dry-run    # plan only
+```
+
+This copies `enrichment.rds` to `enrichment.rds.bak` and writes shard files; it **never deletes** the monolith.
+
+Use **`EXPRS_ORA_DEBUG=1`** for verbose `[ORA debug]` pathway messages (off by default). Optional timing: **`EXPRS_ORA_PROFILE=1`** or `Rscript scripts/profile_ora_pipeline.R`.
 
 Install from Bioconductor, for example:
 

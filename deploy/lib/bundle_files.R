@@ -98,6 +98,19 @@ study_ora_rds_abs_path_deploy <- function(repo_root, study_id) {
   normalizePath(file.path(repo_root, "data", study_id, rel), winslash = "/", mustWork = FALSE)
 }
 
+study_ora_shard_abs_path_deploy <- function(repo_root, study_id, pathway_rel_file) {
+  monolith <- study_ora_rds_abs_path_deploy(repo_root, study_id)
+  if (is.na(monolith) || !nzchar(monolith)) {
+    return(NA_character_)
+  }
+  base <- tools::file_path_sans_ext(basename(as.character(pathway_rel_file)))
+  normalizePath(
+    file.path(dirname(monolith), "enrichment", paste0(base, ".rds")),
+    winslash = "/",
+    mustWork = FALSE
+  )
+}
+
 study_ora_rds_compatible_deploy <- function(obj, pathway_rel_file, study_id) {
   if (is.null(obj) || !is.list(obj)) {
     return(FALSE)
@@ -208,6 +221,18 @@ collect_study_file_paths <- function(repo_root, study_id) {
   rels <- c(rels, add_rel(cfg$comparison_file))
   rels <- c(rels, add_rel(cfg$gdegs_file))
   rels <- c(rels, add_rel(cfg$ora_file))
+  monolith_rel <- if (!is.null(cfg$ora_file) && nzchar(as.character(cfg$ora_file))) {
+    as.character(cfg$ora_file)
+  } else {
+    "ora/enrichment.rds"
+  }
+  shard_dir <- file.path(repo_root, "data", study_id, dirname(monolith_rel), "enrichment")
+  if (dir.exists(shard_dir)) {
+    shard_files <- list.files(shard_dir, pattern = "\\.rds$", full.names = FALSE)
+    for (bn in shard_files) {
+      rels <- c(rels, file.path("data", study_id, dirname(monolith_rel), "enrichment", bn))
+    }
+  }
   rels <- c(rels, add_rel(cfg$deg_file))
   if (!is.null(cfg$deg_lists) && length(cfg$deg_lists) > 0L) {
     for (e in cfg$deg_lists) {
@@ -380,21 +405,43 @@ validate_ora_precompute <- function(
       next
     }
     abs_rds <- study_ora_rds_abs_path_deploy(repo_root, sid)
-    if (is.na(abs_rds) || !file.exists(abs_rds)) {
-      msgs <- c(msgs, sprintf("study %s: missing ORA RDS at %s", sid, abs_rds))
-      next
-    }
-    obj <- tryCatch(readRDS(abs_rds), error = function(e) NULL)
-    if (is.null(obj)) {
-      msgs <- c(msgs, sprintf("study %s: unreadable ORA RDS %s", sid, abs_rds))
-      next
+    has_monolith <- !is.na(abs_rds) && file.exists(abs_rds)
+    monolith_obj <- NULL
+    if (has_monolith) {
+      monolith_obj <- tryCatch(readRDS(abs_rds), error = function(e) NULL)
+      if (is.null(monolith_obj)) {
+        msgs <- c(msgs, sprintf("study %s: unreadable ORA RDS %s", sid, abs_rds))
+      }
     }
     for (pf in pathway_basenames) {
-      if (!study_ora_rds_compatible_deploy(obj, pf, sid)) {
-        msgs <- c(
-          msgs,
-          sprintf("study %s: ORA RDS not compatible with pathway_file=%s", sid, pf)
-        )
+      shard_abs <- study_ora_shard_abs_path_deploy(repo_root, sid, pf)
+      has_shard <- !is.na(shard_abs) && file.exists(shard_abs)
+      ok <- FALSE
+      if (has_shard) {
+        shard_obj <- tryCatch(readRDS(shard_abs), error = function(e) NULL)
+        if (!is.null(shard_obj) && study_ora_rds_compatible_deploy(shard_obj, pf, sid)) {
+          ok <- TRUE
+        } else {
+          msgs <- c(
+            msgs,
+            sprintf("study %s: shard not compatible with pathway_file=%s (%s)", sid, pf, shard_abs)
+          )
+        }
+      } else if (has_monolith && !is.null(monolith_obj) &&
+          study_ora_rds_compatible_deploy(monolith_obj, pf, sid)) {
+        ok <- TRUE
+      }
+      if (!ok && !has_shard) {
+        if (!has_monolith) {
+          msgs <- c(msgs, sprintf("study %s: missing ORA monolith and shard for %s", sid, pf))
+        } else if (is.null(monolith_obj)) {
+          NULL
+        } else {
+          msgs <- c(
+            msgs,
+            sprintf("study %s: ORA RDS not compatible with pathway_file=%s", sid, pf)
+          )
+        }
       }
     }
   }

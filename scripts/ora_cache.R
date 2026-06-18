@@ -85,6 +85,95 @@ study_ora_rds_abs_path <- function(study_id) {
   file.path("data", study_id, rel)
 }
 
+#' Per-ontology shard under `ora/enrichment/<pathway_basename>.rds` next to monolithic `ora_file`.
+study_ora_shard_abs_path <- function(study_id, pathway_rel_file) {
+  monolith <- study_ora_rds_abs_path(study_id)
+  if (is.na(monolith) || !nzchar(monolith)) {
+    return(NA_character_)
+  }
+  pf <- as.character(pathway_rel_file)
+  if (!nzchar(pf)) {
+    return(NA_character_)
+  }
+  base <- tools::file_path_sans_ext(basename(pf))
+  file.path(dirname(monolith), "enrichment", paste0(base, ".rds"))
+}
+
+#' Prefer ontology shard on disk; fall back to monolithic enrichment.rds.
+ora_study_cache_source_path <- function(study_id, pathway_rel_file) {
+  shard <- study_ora_shard_abs_path(study_id, pathway_rel_file)
+  if (!is.na(shard) && nzchar(shard) && file.exists(shard)) {
+    return(shard)
+  }
+  monolith <- study_ora_rds_abs_path(study_id)
+  if (!is.na(monolith) && nzchar(monolith) && file.exists(monolith)) {
+    return(monolith)
+  }
+  NA_character_
+}
+
+ora_build_shard_obj <- function(study_id, pathway_rel_file, long_df, created = NULL) {
+  pf <- as.character(pathway_rel_file)
+  ld <- long_df
+  if (is.data.frame(ld) && nrow(ld) > 0L && "pathway_file" %in% colnames(ld)) {
+    ld <- ld[as.character(ld$pathway_file) == pf, , drop = FALSE]
+  }
+  if (is.data.frame(ld) && "pathway_file" %in% colnames(ld)) {
+    ld$pathway_file <- NULL
+  }
+  list(
+    version = ORA_CACHE_VERSION,
+    study_id = as.character(study_id),
+    pathway_file = pf,
+    pathway_files = pf,
+    created = if (!is.null(created)) created else Sys.time(),
+    long_df = ld
+  )
+}
+
+#' Write one per-ontology shard (does not modify monolithic enrichment.rds).
+ora_write_study_pathway_shard <- function(study_id, pathway_rel_file, long_df, created = NULL) {
+  shard_path <- study_ora_shard_abs_path(study_id, pathway_rel_file)
+  if (is.na(shard_path) || !nzchar(shard_path)) {
+    return(invisible(FALSE))
+  }
+  obj <- ora_build_shard_obj(study_id, pathway_rel_file, long_df, created = created)
+  dir.create(dirname(shard_path), recursive = TRUE, showWarnings = FALSE)
+  saveRDS(obj, shard_path)
+  invisible(TRUE)
+}
+
+#' Upsert shards for one or more pathway files from a monolith-style `long_df`.
+ora_sync_shards_from_long_df <- function(study_id, long_df, pathway_files, created = NULL) {
+  pfs <- unique(as.character(pathway_files))
+  pfs <- pfs[nzchar(pfs)]
+  if (length(pfs) < 1L) {
+    return(invisible(0L))
+  }
+  for (pf in pfs) {
+    ora_write_study_pathway_shard(study_id, pf, long_df, created = created)
+  }
+  invisible(length(pfs))
+}
+
+#' After writing monolith RDS, refresh shard file(s) for the pathway(s) just updated.
+ora_sync_shards_after_monolith_write <- function(study_id, obj, pathway_files = NULL) {
+  if (is.null(obj) || !is.list(obj) || !is.data.frame(obj$long_df)) {
+    return(invisible(0L))
+  }
+  pfs <- pathway_files
+  if (is.null(pfs) || length(pfs) < 1L) {
+    if (!is.null(obj$pathway_files) && length(obj$pathway_files) > 0L) {
+      pfs <- obj$pathway_files
+    } else if ("pathway_file" %in% colnames(obj$long_df)) {
+      pfs <- unique(as.character(obj$long_df$pathway_file))
+    } else {
+      return(invisible(0L))
+    }
+  }
+  ora_sync_shards_from_long_df(study_id, obj$long_df, pfs, created = obj$created)
+}
+
 study_ora_rds_compatible <- function(obj, pathway_rel_file, study_id) {
   if (is.null(obj) || !is.list(obj)) return(FALSE)
   if (!identical(as.character(obj$study_id), as.character(study_id))) return(FALSE)
@@ -116,6 +205,76 @@ study_ora_rds_compatible <- function(obj, pathway_rel_file, study_id) {
   FALSE
 }
 
+# In-session caches for ORA tab load (invalidated when enrichment.rds mtime changes).
+.ora_study_rds_cache <- new.env(parent = emptyenv())
+.ora_pathway_slice_cache <- new.env(parent = emptyenv())
+
+ora_study_rds_cache_key <- function(sid, abs_path) {
+  if (!nzchar(abs_path) || !file.exists(abs_path)) {
+    return(NA_character_)
+  }
+  mtime <- file.info(abs_path, extra_cols = FALSE)$mtime
+  paste(
+    as.character(sid),
+    normalizePath(abs_path, winslash = "/", mustWork = TRUE),
+    format(mtime, "%Y-%m-%d %H:%M:%S"),
+    sep = "\x1f"
+  )
+}
+
+ora_study_rds_cache_get <- function(sid, abs_path) {
+  key <- ora_study_rds_cache_key(sid, abs_path)
+  if (is.na(key) || !exists(key, envir = .ora_study_rds_cache, inherits = FALSE)) {
+    return(NULL)
+  }
+  get(key, envir = .ora_study_rds_cache, inherits = FALSE)
+}
+
+ora_study_rds_cache_set <- function(sid, abs_path, obj) {
+  key <- ora_study_rds_cache_key(sid, abs_path)
+  if (is.na(key)) {
+    return(invisible(NULL))
+  }
+  assign(key, obj, envir = .ora_study_rds_cache)
+  invisible(NULL)
+}
+
+ora_pathway_slice_cache_key <- function(sid, pathway_rel_file, abs_path) {
+  base <- ora_study_rds_cache_key(sid, abs_path)
+  if (is.na(base)) {
+    return(NA_character_)
+  }
+  paste(base, as.character(pathway_rel_file), sep = "\x1f")
+}
+
+#' Filter a cached per-study RDS object to one ontology + config DEG lists.
+ora_slice_long_df_from_obj <- function(obj, pathway_rel_file, study_id) {
+  if (is.null(obj) || !study_ora_rds_compatible(obj, pathway_rel_file, study_id)) {
+    return(NULL)
+  }
+  ld <- obj$long_df
+  ver <- suppressWarnings(as.integer(obj$version))
+  if (length(ver) == 1L && !is.na(ver) && ver == ORA_CACHE_VERSION) {
+    if ("pathway_file" %in% colnames(ld)) {
+      ld <- ld[as.character(ld$pathway_file) == as.character(pathway_rel_file), , drop = FALSE]
+      ld$pathway_file <- NULL
+    } else if (!is.null(obj$pathway_file)) {
+      if (!identical(as.character(obj$pathway_file), as.character(pathway_rel_file))) {
+        return(NULL)
+      }
+    } else {
+      pfs <- obj$pathway_files
+      if (is.null(pfs) || length(pfs) < 1L) {
+        return(NULL)
+      }
+      if (!as.character(pathway_rel_file) %in% as.character(pfs)) {
+        return(NULL)
+      }
+    }
+  }
+  ora_filter_long_df_to_config_deg_lists(ld, study_id)
+}
+
 #' Try loading per-study RDS files (one `long_df` per study, all DEG lists in `comparison` column).
 #' Paths come from each study’s `config.yaml` via `study_ora_rds_abs_path()`. Skips live `enricher` when every
 #' study with DEG lists has a compatible RDS for `pathway_rel_file` (version, pathway membership).
@@ -138,27 +297,35 @@ ora_try_load_per_study_caches <- function(study_ids, pathway_rel_file) {
     if (length(study_deg_lists(sid)) == 0L) {
       next
     }
-    abs_path <- study_ora_rds_abs_path(sid)
-    if (is.na(abs_path) || !nzchar(abs_path) || !file.exists(abs_path)) {
+    source_path <- ora_study_cache_source_path(sid, pathway_rel_file)
+    if (is.na(source_path) || !nzchar(source_path) || !file.exists(source_path)) {
       ok_all <- FALSE
       next
     }
-    obj <- tryCatch(readRDS(abs_path), error = function(e) NULL)
+    slice_key <- ora_pathway_slice_cache_key(sid, pathway_rel_file, source_path)
+    if (!is.na(slice_key) && exists(slice_key, envir = .ora_pathway_slice_cache, inherits = FALSE)) {
+      long_by_sid[[sid]] <- get(slice_key, envir = .ora_pathway_slice_cache, inherits = FALSE)
+      next
+    }
+    obj <- ora_study_rds_cache_get(sid, source_path)
+    if (is.null(obj)) {
+      obj <- tryCatch(readRDS(source_path), error = function(e) NULL)
+      if (!is.null(obj)) {
+        ora_study_rds_cache_set(sid, source_path, obj)
+      }
+    }
     if (is.null(obj) || !study_ora_rds_compatible(obj, pathway_rel_file, sid)) {
       ok_all <- FALSE
       next
     }
-    ld <- obj$long_df
-    ver <- suppressWarnings(as.integer(obj$version))
-    if (length(ver) == 1L && !is.na(ver) && ver == ORA_CACHE_VERSION) {
-      if (!"pathway_file" %in% colnames(ld)) {
-        ok_all <- FALSE
-        next
-      }
-      ld <- ld[as.character(ld$pathway_file) == as.character(pathway_rel_file), , drop = FALSE]
-      ld$pathway_file <- NULL
+    ld <- ora_slice_long_df_from_obj(obj, pathway_rel_file, sid)
+    if (is.null(ld)) {
+      ok_all <- FALSE
+      next
     }
-    ld <- ora_filter_long_df_to_config_deg_lists(ld, sid)
+    if (!is.na(slice_key)) {
+      assign(slice_key, ld, envir = .ora_pathway_slice_cache)
+    }
     long_by_sid[[sid]] <- ld
   }
   list(ok_all = ok_all, long_by_sid = long_by_sid)
@@ -215,6 +382,27 @@ ora_filter_long_df_to_config_deg_lists <- function(long_df, study_id) {
   long_df[as.character(long_df$comparison) %in% allowed, , drop = FALSE]
 }
 
+#' Drop cached ORA rows for DEG lists hidden in the Config tab.
+ora_filter_long_by_visibility <- function(long_by_sid, deg_by_study) {
+  if (is.null(long_by_sid) || length(long_by_sid) < 1L) return(long_by_sid)
+  if (is.null(deg_by_study)) return(long_by_sid)
+  out <- long_by_sid
+  for (sid in names(out)) {
+    df <- out[[sid]]
+    if (is.null(df) || !is.data.frame(df) || nrow(df) < 1L) next
+    if (!"comparison" %in% colnames(df)) next
+    vis <- deg_by_study[[sid]]
+    if (is.null(vis) || length(vis) < 1L) {
+      out[[sid]] <- df[integer(0), , drop = FALSE]
+      next
+    }
+    lists <- filter_deg_lists_visible(study_deg_lists(sid), vis)
+    labels <- unique(vapply(lists, ora_deg_entry_comparison_label, character(1L)))
+    out[[sid]] <- df[as.character(df$comparison) %in% labels, , drop = FALSE]
+  }
+  out
+}
+
 #' Resolve ORA parallel worker count (cap by cores and task count).
 #' @param workers `NULL` → `EXPRS_ORA_WORKERS` env, then `1`. Values `< 2` use sequential execution.
 ora_resolve_ora_workers <- function(workers, n_tasks) {
@@ -241,12 +429,17 @@ ora_resolve_ora_workers <- function(workers, n_tasks) {
 }
 
 #' Ordered tasks for ORA: one entry per DEG list row (study order × list order).
-ora_build_deg_tasks <- function(study_ids, study_labels, deg_filter = NULL) {
+#' @param deg_by_study Optional named list: study_id -> character vector of visible deg_file paths.
+ora_build_deg_tasks <- function(study_ids, study_labels, deg_filter = NULL, deg_by_study = NULL) {
   tasks <- list()
   for (sid in study_ids) {
     lists <- study_deg_lists(sid)
     if (length(lists) == 0L) {
       next
+    }
+    if (!is.null(deg_by_study)) {
+      lists <- filter_deg_lists_visible(lists, deg_by_study[[sid]])
+      if (length(lists) < 1L) next
     }
     lists <- ora_filter_deg_lists(lists, deg_filter)
     slbl <- study_labels[[sid]]
@@ -647,6 +840,7 @@ ora_precompute_incremental_merge_save <- function(
   )
   dir.create(dirname(op), recursive = TRUE, showWarnings = FALSE)
   saveRDS(obj, op)
+  ora_sync_shards_after_monolith_write(sid, obj, pathway_files = as.character(pathway_file))
   message(
     "[incremental] ", basename(op), ": ", nrow(merged), " row(s) total — ",
     comparison_label, " × ", pathway_file
@@ -757,6 +951,7 @@ ora_precompute_incremental_merge_round <- function(
   )
   dir.create(dirname(op), recursive = TRUE, showWarnings = FALSE)
   saveRDS(obj, op)
+  ora_sync_shards_after_monolith_write(sid, obj, pathway_files = unique(pfs_merged))
   message(
     "[incremental-round] ", basename(op), ": ", nrow(merged), " row(s) total — ",
     cmp, " × ", n_merge, " ontology file(s) merged in one write"
@@ -812,7 +1007,8 @@ ora_run_enrichment_long_by_study <- function(
     min_gs_size = 1L,
     max_gs_size = 50000L,
     progress = NULL,
-    workers = NULL) {
+    workers = NULL,
+    deg_by_study = NULL) {
   if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
     return(list(
       error = paste0("Install Bioconductor package: BiocManager::install(\"clusterProfiler\")"),
@@ -831,7 +1027,7 @@ ora_run_enrichment_long_by_study <- function(
     stringsAsFactors = FALSE
   )
 
-  tasks <- ora_build_deg_tasks(study_ids, study_labels, deg_filter = NULL)
+  tasks <- ora_build_deg_tasks(study_ids, study_labels, deg_filter = NULL, deg_by_study = deg_by_study)
   den <- max(1L, length(tasks))
   long_by_sid <- ora_execute_deg_tasks(
     tasks,
@@ -860,7 +1056,8 @@ ora_run_enrichment_long_by_study_t2g <- function(
     min_gs_size = 1L,
     max_gs_size = 50000L,
     progress = NULL,
-    workers = NULL) {
+    workers = NULL,
+    deg_by_study = NULL) {
   if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
     return(list(
       error = paste0("Install Bioconductor package: BiocManager::install(\"clusterProfiler\")"),
@@ -881,7 +1078,7 @@ ora_run_enrichment_long_by_study_t2g <- function(
     return(list(error = "Custom ontology has no valid term–gene rows.", long_by_sid = NULL))
   }
 
-  tasks <- ora_build_deg_tasks(study_ids, study_labels, deg_filter = NULL)
+  tasks <- ora_build_deg_tasks(study_ids, study_labels, deg_filter = NULL, deg_by_study = deg_by_study)
   den <- max(1L, length(tasks))
   plab <- as.character(pathway_label)
   long_by_sid <- ora_execute_deg_tasks(

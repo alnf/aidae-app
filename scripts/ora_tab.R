@@ -886,7 +886,8 @@ ora_build_pathway_mode_matrix <- function(
     study_labels,
     combined_df,
     hide_empty_comparisons = FALSE,
-    term2gene_df = NULL) {
+    term2gene_df = NULL,
+    deg_by_study = NULL) {
   pathway_genes <- character(0)
   sub <- NULL
   if (!is.null(combined_df) && nrow(combined_df) > 0L) {
@@ -936,6 +937,9 @@ ora_build_pathway_mode_matrix <- function(
   p_adj_threshold <- 0.05
   for (sid in study_ids) {
     lists <- study_deg_lists(sid)
+    if (!is.null(deg_by_study)) {
+      lists <- filter_deg_lists_visible(lists, deg_by_study[[sid]])
+    }
     if (length(lists) < 1L) next
     s_lbl <- study_labels[[sid]]
     if (is.null(s_lbl) || !nzchar(as.character(s_lbl))) s_lbl <- sid
@@ -1574,17 +1578,17 @@ oraTabUI <- function(id, study_ids, study_labels, ora_file_choices, pathway_defa
         shiny::tags$div(
           class = "text-muted",
           style = "font-size: 0.9rem; margin-bottom: 8px;",
-          "Each study’s precomputed table is read from the path in ",
-          shiny::tags$code("config.yaml"),
-          " (key ",
+          "Each study’s precomputed table is read from ",
+          shiny::tags$code("ora/enrichment/<pathway_basename>.rds"),
+          " when present, else monolithic ",
           shiny::tags$code("ora_file"),
-          ", default ",
+          " (default ",
           shiny::tags$code("ora/enrichment.rds"),
-          "). The app uses that RDS when it contains the selected pathway database (same version as the app); otherwise it falls back to legacy ",
-          shiny::tags$code("data/ora_cache/<pathway_basename>.rds"),
-          ", then runs ",
+          "). Legacy ",
+          shiny::tags$code("data/ora_cache/"),
+          " or live ",
           shiny::tags$code("enricher"),
-          ". Sidebar thresholds only ",
+          " apply if neither cache is available. Sidebar thresholds only ",
           shiny::tags$strong("filter"),
           " cached results. A progress bar appears only while loading or computing enrichment."
         )
@@ -1611,7 +1615,8 @@ oraTabUI <- function(id, study_ids, study_labels, ora_file_choices, pathway_defa
               class = "text-muted",
               style = "font-size: 0.95rem;",
               shiny::textOutput(ns("ora_heatmap_selection_msg"), inline = FALSE)
-            )
+            ),
+            shiny::uiOutput(ns("ora_panels_action_ui"))
           )
         ),
         shiny::fluidRow(
@@ -1635,7 +1640,9 @@ oraTabUI <- function(id, study_ids, study_labels, ora_file_choices, pathway_defa
 #' @param ora_input reactive: list(min_overlap, min_count, min_gene_ratio, show_category)
 #' @param copy_genes_trigger reactive trigger for "copy visible genes" action
 #' @param on_gene_select callback(symbol) for opening Gene tab and selecting symbol
+#' @param on_open_panels callback(study_id) to open Panels tab for the selected study
 #' @param custom_ontology reactive returning `list(active = logical, t2g = data.frame(term, gene) | NULL)`
+#' @param deg_by_study reactive or static named list: study_id -> visible deg_file paths
 oraTabServer <- function(
     id,
     study_ids,
@@ -1643,11 +1650,21 @@ oraTabServer <- function(
     ora_input,
     copy_genes_trigger = NULL,
     on_gene_select = NULL,
-    custom_ontology = NULL) {
+    on_open_panels = NULL,
+    custom_ontology = NULL,
+    deg_by_study = NULL) {
   shiny::moduleServer(id, function(input, output, session) {
-    assay_type_by_label <- .ora_study_assay_types(study_ids, study_labels)
+    app_scope <- function() {
+      list(
+        study_ids = if (is.function(study_ids)) study_ids() else study_ids,
+        study_labels = if (is.function(study_labels)) study_labels() else study_labels,
+        deg_by_study = if (is.function(deg_by_study)) deg_by_study() else deg_by_study
+      )
+    }
+
     output$ora_assay_legend_ui <- shiny::renderUI({
-      if (length(assay_type_by_label) < 1L) return(NULL)
+      sc <- app_scope()
+      assay_type_by_label <- .ora_study_assay_types(sc$study_ids, sc$study_labels)
       assays <- unique(as.character(assay_type_by_label))
       assays <- assays[!is.na(assays) & nzchar(assays)]
       if (length(assays) < 1L) return(NULL)
@@ -1672,6 +1689,9 @@ oraTabServer <- function(
       )
     })
     .ora_debug_log <- function(...) {
+      if (!identical(Sys.getenv("EXPRS_ORA_DEBUG", unset = ""), "1")) {
+        return(invisible(NULL))
+      }
       message("[ORA debug] ", paste0(..., collapse = ""))
     }
 
@@ -1701,6 +1721,10 @@ oraTabServer <- function(
 
     # Heavy: cache load or enricher — depends on pathway file and optional custom ontology.
     ora_long_source <- shiny::reactive({
+      sc <- app_scope()
+      sids <- sc$study_ids
+      slbls <- sc$study_labels
+      dbg <- sc$deg_by_study
       co <- if (is.function(custom_ontology)) custom_ontology() else NULL
       use_custom <- !is.null(co) && is.list(co) && isTRUE(co$active) && is.data.frame(co$t2g) && nrow(co$t2g) > 0L
       if (!is.null(co) && is.list(co) && isTRUE(co$active) && !use_custom) {
@@ -1723,19 +1747,20 @@ oraTabServer <- function(
             long_by_sid = NULL
           ))
         }
-        return(shiny::withProgress(message = "Running ORA on custom ontology…", value = 0, {
+        return(        shiny::withProgress(message = "Running ORA on custom ontology…", value = 0, {
           n_steps <- 0L
-          for (sid2 in study_ids) {
-            n_steps <- n_steps + length(study_deg_lists(sid2))
+          for (sid2 in sids) {
+            n_steps <- n_steps + length(filter_deg_lists_visible(study_deg_lists(sid2), if (!is.null(dbg)) dbg[[sid2]] else NULL))
           }
           den <- max(1L, n_steps)
           run <- ora_run_enrichment_long_by_study_t2g(
-            study_ids,
-            study_labels,
+            sids,
+            slbls,
             co$t2g,
             pathway_label = ORA_CUSTOM_ONTOLOGY_KEY,
             min_gs_size = 1L,
             max_gs_size = 50000L,
+            deg_by_study = dbg,
             progress = function(amount, detail) {
               shiny::incProgress(amount, detail = detail)
             }
@@ -1768,7 +1793,7 @@ oraTabServer <- function(
               long_by_sid = NULL
             ))
           }
-          list(error = NULL, long_by_sid = run$long_by_sid)
+          list(error = NULL, long_by_sid = ora_filter_long_by_visibility(run$long_by_sid, dbg))
         }))
       }
 
@@ -1781,9 +1806,9 @@ oraTabServer <- function(
         ))
       }
 
-      per <- ora_try_load_per_study_caches(study_ids, pathway_file)
+      per <- ora_try_load_per_study_caches(sids, pathway_file)
       if (isTRUE(per$ok_all)) {
-        return(list(error = NULL, long_by_sid = per$long_by_sid))
+        return(list(error = NULL, long_by_sid = ora_filter_long_by_visibility(per$long_by_sid, dbg)))
       }
 
       cache_path <- ora_cache_rds_path(pathway_file)
@@ -1791,10 +1816,13 @@ oraTabServer <- function(
 
       if (use_cache) {
         cached <- tryCatch(ora_read_cache(cache_path), error = function(e) NULL)
-        if (!is.null(cached) && cache_compatible_with_app(cached, pathway_file, study_ids)) {
+        if (!is.null(cached) && cache_compatible_with_app(cached, pathway_file, sids)) {
           return(list(
             error = NULL,
-            long_by_sid = ora_cache_subset_studies(cached$long_by_sid, study_ids)
+            long_by_sid = ora_filter_long_by_visibility(
+              ora_cache_subset_studies(cached$long_by_sid, sids),
+              dbg
+            )
           ))
         }
       }
@@ -1822,17 +1850,18 @@ oraTabServer <- function(
 
       shiny::withProgress(message = "Running ORA (overrepresentation analysis)…", value = 0, {
         n_steps <- 0L
-        for (sid2 in study_ids) {
-          n_steps <- n_steps + length(study_deg_lists(sid2))
+        for (sid2 in sids) {
+          n_steps <- n_steps + length(filter_deg_lists_visible(study_deg_lists(sid2), if (!is.null(dbg)) dbg[[sid2]] else NULL))
         }
         den <- max(1L, n_steps)
 
         run <- ora_run_enrichment_long_by_study(
-          study_ids,
-          study_labels,
+          sids,
+          slbls,
           pathway_file,
           min_gs_size = 1L,
           max_gs_size = 50000L,
+          deg_by_study = dbg,
           progress = function(amount, detail) {
             shiny::incProgress(amount, detail = detail)
           }
@@ -1841,12 +1870,15 @@ oraTabServer <- function(
           return(list(error = run$error, long_by_sid = NULL))
         }
 
-        list(error = NULL, long_by_sid = run$long_by_sid)
+        list(error = NULL, long_by_sid = ora_filter_long_by_visibility(run$long_by_sid, dbg))
       })
     })
 
     # Light: filter + top-N — re-runs when sidebar ORA thresholds change.
     ora_by_study <- shiny::reactive({
+      sc <- app_scope()
+      sids <- sc$study_ids
+      slbls <- sc$study_labels
       shiny::req(ora_input())
       oi <- ora_input()
 
@@ -1874,8 +1906,8 @@ oraTabServer <- function(
       }
       ob <- ora_build_plot_payload(
         src$long_by_sid,
-        study_ids,
-        study_labels,
+        sids,
+        slbls,
         min_ol,
         min_ct,
         min_gr,
@@ -1884,7 +1916,7 @@ oraTabServer <- function(
         max_p_adj = max_p_adj
       )
       vis_summ <- character(0)
-      for (sid in study_ids) {
+      for (sid in sids) {
         b <- ob$by_study[[sid]]
         nvis <- if (!is.null(b) && !is.null(b$plot_df) && is.data.frame(b$plot_df)) nrow(b$plot_df) else 0L
         vis_summ <- c(vis_summ, paste0(sid, "=", nvis))
@@ -1902,8 +1934,21 @@ oraTabServer <- function(
     })
 
     study_label_for <- function(sid) {
-      lbl <- study_labels[[sid]]
+      sc <- app_scope()
+      lbl <- sc$study_labels[[sid]]
       if (is.null(lbl) || !nzchar(as.character(lbl))) as.character(sid) else as.character(lbl)
+    }
+
+    .comparison_visible <- function(sid, comparison) {
+      sc <- app_scope()
+      if (!sid %in% sc$study_ids) return(FALSE)
+      dbg <- sc$deg_by_study
+      if (is.null(dbg)) return(TRUE)
+      vis <- dbg[[sid]]
+      if (is.null(vis) || length(vis) < 1L) return(FALSE)
+      lists <- filter_deg_lists_visible(study_deg_lists(sid), vis)
+      labels <- vapply(lists, ora_deg_entry_comparison_label, character(1L))
+      as.character(comparison) %in% labels
     }
 
     output$ora_dotplot_status <- shiny::renderUI({
@@ -1956,13 +2001,15 @@ oraTabServer <- function(
     })
 
     ora_combined_plot_df <- shiny::reactive({
+      sc <- app_scope()
+      sids <- sc$study_ids
       ob <- ora_by_study()
       if (!is.null(ob$error)) {
         return(list(error = ob$error, combined = NULL, ob = ob))
       }
       dfs <- list()
       first_msg <- NULL
-      for (sid in study_ids) {
+      for (sid in sids) {
         b <- ob$by_study[[sid]]
         if (is.null(b)) next
         if (!is.null(b$msg)) {
@@ -2004,14 +2051,15 @@ oraTabServer <- function(
     })
 
     ora_dotplot_dims <- shiny::reactive({
+      sc <- app_scope()
       d <- ora_combined_plot_df()
       if (!is.null(d$error) || is.null(d$combined) || nrow(d$combined) < 1L) {
         return(.ora_msg_plot_px())
       }
       m <- ora_dotplot_layout_metrics(
         d$combined,
-        study_ids,
-        study_labels,
+        sc$study_ids,
+        sc$study_labels,
         d$ob$pathway_level_order
       )
       list(width = m$width, height = m$height)
@@ -2030,12 +2078,14 @@ oraTabServer <- function(
 
     if (requireNamespace("ggiraph", quietly = TRUE)) {
       output$ora_plot_all <- ggiraph::renderGirafe({
+        sc <- app_scope()
+        assay_type_by_label <- .ora_study_assay_types(sc$study_ids, sc$study_labels)
         d <- ora_combined_plot_df()
         dims <- ora_dotplot_dims()
         if (!is.null(d$error)) {
           gp <- .ora_msg_plot(d$error)
         } else {
-          study_label_levels <- .ora_facet_study_label_levels(d$combined, study_ids, study_labels)
+          study_label_levels <- .ora_facet_study_label_levels(d$combined, sc$study_ids, sc$study_labels)
           gp <- tryCatch(
             .ora_faceted_comparison_plot_girafe(
               d$combined,
@@ -2070,13 +2120,15 @@ oraTabServer <- function(
 
     output$ora_plot_all_fallback <- shiny::renderPlot(
       {
+        sc <- app_scope()
+        assay_type_by_label <- .ora_study_assay_types(sc$study_ids, sc$study_labels)
         d <- ora_combined_plot_df()
         dims <- ora_dotplot_dims()
         if (!is.null(d$error)) {
           return(.ora_msg_plot(d$error))
         }
         combined <- d$combined
-        study_label_levels <- .ora_facet_study_label_levels(combined, study_ids, study_labels)
+        study_label_levels <- .ora_facet_study_label_levels(combined, sc$study_ids, sc$study_labels)
 
         tryCatch(
           .ora_faceted_comparison_plot(
@@ -2097,13 +2149,15 @@ oraTabServer <- function(
       if (is.null(id) || !nzchar(as.character(id))) return(NULL)
       parts <- strsplit(as.character(id), "\\|\\|\\|", fixed = FALSE)[[1L]]
       if (length(parts) < 5L) return(NULL)
-      list(
+      sp <- list(
         study_id = parts[[1L]],
         study_label = parts[[2L]],
         comparison = parts[[3L]],
         pathway_id = parts[[4L]],
         pathway_desc = parts[[5L]]
       )
+      if (!.comparison_visible(sp$study_id, sp$comparison)) return(NULL)
+      sp
     })
 
     output$ora_heatmap_selection_msg <- shiny::renderText({
@@ -2126,7 +2180,39 @@ oraTabServer <- function(
       }
     })
 
+    output$ora_panels_action_ui <- shiny::renderUI({
+      sp <- selected_point()
+      if (is.null(sp)) return(NULL)
+      co <- if (is.function(custom_ontology)) custom_ontology() else NULL
+      if (is.null(co) || !is.list(co) || !isTRUE(co$active)) return(NULL)
+      oi <- ora_input()
+      mode <- if (!is.null(oi$click_target) && identical(oi$click_target, "comparison")) "comparison" else "pathway"
+      if (!identical(mode, "comparison")) return(NULL)
+      shiny::tags$div(
+        style = "margin: 8px 0 12px 0;",
+        shiny::actionButton(
+          session$ns("open_expression_panel"),
+          "Open expression panel",
+          class = "btn-sm btn-primary"
+        ),
+        shiny::tags$span(
+          class = "text-muted",
+          style = "margin-left: 8px; font-size: 0.88rem;",
+          "View ontology genes on the Panels tab for this study."
+        )
+      )
+    })
+
+    shiny::observeEvent(input$open_expression_panel, {
+      if (is.null(on_open_panels) || !is.function(on_open_panels)) return()
+      sp <- selected_point()
+      if (is.null(sp) || is.null(sp$study_id) || !nzchar(as.character(sp$study_id))) return()
+      on_open_panels(as.character(sp$study_id))
+    }, ignoreInit = TRUE)
+
     ora_heatmap_state <- shiny::reactive({
+      sc <- app_scope()
+      assay_type_by_label <- .ora_study_assay_types(sc$study_ids, sc$study_labels)
       sp <- selected_point()
       if (is.null(sp)) {
         return(list(
@@ -2165,11 +2251,12 @@ oraTabServer <- function(
           pathway_file_heat,
           sp$pathway_id,
           sp$pathway_desc,
-          study_ids,
-          study_labels,
+          sc$study_ids,
+          sc$study_labels,
           d$combined,
           hide_empty_comparisons = isTRUE(oi$hide_empty_pathway_comparisons),
-          term2gene_df = term2gene_custom
+          term2gene_df = term2gene_custom,
+          deg_by_study = sc$deg_by_study
         )
         if (!is.null(pm$error)) {
           return(list(plot = .ora_msg_plot(pm$error), mode = "none", n_rows = 0L, n_cols = 0L, mat = NULL))
@@ -2178,7 +2265,7 @@ oraTabServer <- function(
           plot = ora_heatmap_plot_pathway_faceted(
             pm$mat,
             title = paste0("Pathway heatplot: ", sp$pathway_desc),
-            study_label_order = vapply(study_ids, study_label_for, character(1L)),
+            study_label_order = vapply(sc$study_ids, study_label_for, character(1L)),
             sig_mat = pm$sig_mat,
             pval_mat = pm$pval_mat,
             assay_type_by_label = assay_type_by_label
@@ -2186,7 +2273,7 @@ oraTabServer <- function(
           plot_girafe = ora_heatmap_plot_pathway_faceted_girafe(
             pm$mat,
             title = paste0("Pathway heatplot: ", sp$pathway_desc),
-            study_label_order = vapply(study_ids, study_label_for, character(1L)),
+            study_label_order = vapply(sc$study_ids, study_label_for, character(1L)),
             sig_mat = pm$sig_mat,
             padj_mat = pm$padj_mat,
             pval_mat = pm$pval_mat,

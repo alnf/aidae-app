@@ -702,6 +702,7 @@ save_study_ora_rds <- function(
   )
   dir.create(dirname(out_path), recursive = TRUE, showWarnings = FALSE)
   saveRDS(obj, out_path)
+  ora_sync_shards_after_monolith_write(sid, obj, pathway_files = pathway_files_union)
   message(
     "[saved] ", sid, " -> ", out_path,
     " (", nrow(long_df), " rows; ", length(pathway_files_union), " pathway files in index)"

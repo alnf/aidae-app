@@ -20,6 +20,11 @@ source("scripts/pathway_signatures.R")
 source("scripts/ora_cache.R")
 source("scripts/ora_tab.R")
 source("scripts/upset_tab.R")
+source("scripts/panel_heatmap_utils.R")
+source("scripts/panel_tab.R")
+source("scripts/config_tab.R")
+
+`%||%` <- function(x, y) if (is.null(x)) y else x
 
 # UI defaults align with make_heatmap() / default_heatmap_thresholds(); study+DEG list can override via config.
 default_thr <- default_heatmap_thresholds()
@@ -95,7 +100,8 @@ if (length(study_choices) == 0L) {
   study_choices <- c("Select study..." = "", study_choices)
 }
 
- 
+study_labels_named <- stats::setNames(study_labels, study_ids)
+study_deg_catalog <- build_study_deg_catalog(study_ids, study_labels_named)
 
 # Default study = none selected; default DEG list empty until study is chosen.
 default_study <- ""
@@ -321,12 +327,24 @@ body <- dashboardBody(
       )
     ),
     tabItem(
+      tabName = "panels",
+      box(
+        title = "Expression panel heatmaps",
+        width = 12, solidHeader = TRUE, status = "secondary",
+        panelTabUI("panels")
+      )
+    ),
+    tabItem(
       tabName = "upset",
       box(
         title = "DEG list intersections (UpSet)",
         width = 12, solidHeader = TRUE, status = "secondary",
         upsetTabUI("upset")
       )
+    ),
+    tabItem(
+      tabName = "config",
+      configTabUI("config", study_deg_catalog)
     )
   )
 )
@@ -345,13 +363,15 @@ ui <- secure_app(dashboardPage(
       navbarTab(tabName = "degs", text = "DEGs"),
       navbarTab(tabName = "gene", text = "Gene"),
       navbarTab(tabName = "ora", text = "ORA"),
-      navbarTab(tabName = "upset", text = "UpSet")
+      navbarTab(tabName = "panels", text = "Panels"),
+      navbarTab(tabName = "upset", text = "UpSet"),
+      navbarTab(tabName = "config", text = "Config")
     )
   ),
   sidebar = dashboardSidebar(
     minified = FALSE,
     shiny::conditionalPanel(
-      condition = "input.navtabs == 'info' || input.navtabs == 'degs' || input.navtabs == 'gene'",
+      condition = "input.navtabs == 'info' || input.navtabs == 'degs' || input.navtabs == 'gene' || input.navtabs == 'panels'",
       selectInput("study", label = "Study", choices = study_choices, selected = default_study)
     ),
     shiny::conditionalPanel(
@@ -375,41 +395,60 @@ ui <- secure_app(dashboardPage(
       checkboxInput("lock_gene_list", label = "Apply selected genes across studies", value = TRUE)
     ),
     shiny::conditionalPanel(
-      condition = "input.navtabs == 'ora'",
+      condition = "input.navtabs == 'ora' || input.navtabs == 'panels'",
       shiny::tags$div(
         style = "font-size: 0.88rem; margin-bottom: 6px;",
-        shiny::tags$strong("Custom ontology (on-the-fly ORA)")
+        shiny::tags$strong("Gene ontology (ORA + Panels)")
       ),
       shiny::fileInput(
-        "ora_custom_ontology_xlsx",
-        label = shiny::tags$span("Excel: symbol + category", style = "font-weight: normal;"),
-        buttonLabel = "Choose .xlsx…",
-        accept = c(".xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "ontology_custom_file",
+        label = shiny::tags$span("File: symbol + category", style = "font-weight: normal;"),
+        buttonLabel = "Choose file…",
+        accept = c(
+          ".xlsx", ".tsv", ".txt",
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "text/tab-separated-values", "text/plain"
+        ),
         width = "100%"
       ),
-      shiny::tags$div(style = "margin-top: 2px;"),
       shiny::actionButton(
-        "ora_load_custom_ontology",
-        "Load custom ontology",
+        "ontology_load",
+        "Load ontology",
         class = "btn-sm btn-primary"
       ),
       shiny::tags$div(style = "height: 4px;"),
       shiny::actionButton(
-        "ora_clear_custom_ontology",
-        "Clear custom",
+        "ontology_clear",
+        "Clear ontology",
         class = "btn-sm btn-default"
       ),
       shiny::tags$div(
         class = "text-muted",
         style = "font-size: 0.78rem; margin: 6px 0 10px 0;",
-        "Long format: col 1 = symbol, col 2 = category (one gene per row; gene sets = all rows per category). ",
-        "Unlike dropdown ",
-        shiny::tags$code(".txt"),
-        " files (one pathway per line). Gene symbols are uppercased on load so matching is case-insensitive. Requires ",
+        "Long format: symbol (or gene) + category columns. Used for custom ORA and Panels heatmaps. ",
         shiny::tags$code("readxl"),
+        " required for ",
+        shiny::tags$code(".xlsx"),
         "."
       ),
-      shiny::tags$hr(),
+      shiny::textOutput("ontology_status", inline = TRUE),
+      shiny::tags$hr()
+    ),
+    shiny::conditionalPanel(
+      condition = "input.navtabs == 'panels'",
+      uiOutput("panels_matrix_ui"),
+      uiOutput("panels_sample_filter_ui"),
+      actionButton("panels_generate", label = "Generate panel heatmap"),
+      tags$div(
+        class = "text-muted",
+        style = "padding: 8px 0; font-size: 0.9rem;",
+        "Choose study, ontology, and region/matrix in the sidebar, then ",
+        shiny::tags$strong("Generate panel heatmap"),
+        ". Display options and significance filter are above the plot."
+      )
+    ),
+    shiny::conditionalPanel(
+      condition = "input.navtabs == 'ora'",
       numericInput("ora_min_overlap", label = "Minimum pathway size (minGSSize):", value = 10L, min = 1L, step = 1L),
       numericInput("ora_min_count", label = "Minimum overlap (Count):", value = 5L, min = 1L, step = 1L),
       numericInput("ora_min_gene_ratio", label = "Minimum gene ratio:", value = 0.1, min = 0, max = 1, step = 0.01),
@@ -481,14 +520,13 @@ ui <- secure_app(dashboardPage(
           style = "font-size: 0.78rem; margin: -6px 0 10px 0;",
           "Mode is always inclusive ",
           shiny::tags$strong("intersect"),
-          " (not distinct). With max degree 2, every pair of DEG lists gets a column when the pair count is below the app cap; raise degree to include triples etc. (then only observed intersections are listed)."
+          " (not distinct). With max degree 2, every non-empty pair gets a column when the pair count is below the app cap; raise degree to include triples etc. (then only observed intersections are listed). Empty intersections (0 genes) are never shown."
         ),
         selectInput(
           "upset_min_intersection",
           label = "Minimum intersection size (genes):",
           choices = c(
-            "No limit" = 0,
-            "1" = 1,
+            "1 (default)" = 1,
             "2" = 2,
             "5" = 5,
             "10" = 10,
@@ -499,7 +537,7 @@ ui <- secure_app(dashboardPage(
             "500" = 500,
             "1,000" = 1000
           ),
-          selected = 0,
+          selected = 1,
           width = "100%"
         ),
         selectInput("upset_study", label = "Study (threshold target)", choices = upset_study_choices, selected = default_upset_study),
@@ -562,13 +600,116 @@ server <- function(input, output, session) {
     }
   }, once = TRUE)
 
+  config_mod <- configTabServer("config", study_deg_catalog)
+  config_visibility <- config_mod$visibility
+
+  app_scope <- shiny::reactive({
+    vis <- config_visibility()
+    list(
+      study_ids = vis$study_ids,
+      study_labels = study_labels_named[vis$study_ids],
+      deg_by_study = vis$deg_by_study
+    )
+  })
+
+  visible_deg_choices_for_study <- function(sid, deg_by_study) {
+    lists <- study_deg_lists(sid)
+    lists <- filter_deg_lists_visible(lists, if (!is.null(deg_by_study)) deg_by_study[[sid]] else NULL)
+    if (length(lists) < 1L) {
+      return(c("(no DEG lists)" = ""))
+    }
+    stats::setNames(
+      vapply(lists, function(x) x$deg_file, character(1L)),
+      vapply(lists, function(x) x$label, character(1L))
+    )
+  }
+
+  sidebar_study_choice_vec <- function(vis_sids, study_labels) {
+    if (length(vis_sids) < 1L) {
+      return(c("(no studies visible)" = ""))
+    }
+    labs <- study_labels[vis_sids]
+    miss <- is.na(labs) | !nzchar(as.character(labs))
+    if (any(miss)) {
+      labs[miss] <- vis_sids[miss]
+    }
+    c("Select study..." = "", stats::setNames(vis_sids, as.character(labs)))
+  }
+
+  sync_sidebar_to_visibility <- function() {
+    sc <- app_scope()
+    vis_sids <- sc$study_ids
+    study_ch <- sidebar_study_choice_vec(vis_sids, sc$study_labels)
+    cur_study <- shiny::isolate(as.character(input$study %||% ""))[[1L]]
+    study_sel <- if (nzchar(cur_study) && cur_study %in% vis_sids) cur_study else ""
+    shiny::updateSelectInput(session, "study", choices = study_ch, selected = study_sel)
+
+    if (nzchar(study_sel)) {
+      deg_ch <- visible_deg_choices_for_study(study_sel, sc$deg_by_study)
+      cur_deg <- shiny::isolate(as.character(input$deg_list %||% ""))[[1L]]
+      deg_vals <- unname(deg_ch)
+      deg_sel <- if (nzchar(cur_deg) && cur_deg %in% deg_vals) cur_deg else if (length(deg_vals) > 0L && nzchar(deg_vals[[1L]])) deg_vals[[1L]] else ""
+      shiny::updateSelectInput(session, "deg_list", choices = deg_ch, selected = deg_sel)
+    } else {
+      shiny::updateSelectInput(session, "deg_list", choices = c("(no DEG lists)" = ""), selected = "")
+    }
+
+    upset_ch <- if (length(vis_sids) < 1L) {
+      c("(no studies)" = "")
+    } else {
+      labs <- sc$study_labels[vis_sids]
+      miss <- is.na(labs) | !nzchar(as.character(labs))
+      if (any(miss)) labs[miss] <- vis_sids[miss]
+      stats::setNames(vis_sids, as.character(labs))
+    }
+    cur_upset <- shiny::isolate(as.character(input$upset_study %||% ""))[[1L]]
+    upset_sel <- if (nzchar(cur_upset) && cur_upset %in% vis_sids) cur_upset else if (length(vis_sids) > 0L) vis_sids[[1L]] else ""
+    shiny::updateSelectInput(session, "upset_study", choices = upset_ch, selected = upset_sel)
+    if (nzchar(upset_sel)) {
+      upset_deg_ch <- visible_deg_choices_for_study(upset_sel, sc$deg_by_study)
+      cur_upset_deg <- shiny::isolate(as.character(input$upset_deg_list %||% ""))[[1L]]
+      upset_deg_vals <- unname(upset_deg_ch)
+      upset_deg_sel <- if (nzchar(cur_upset_deg) && cur_upset_deg %in% upset_deg_vals) {
+        cur_upset_deg
+      } else if (length(upset_deg_vals) > 0L && nzchar(upset_deg_vals[[1L]])) {
+        upset_deg_vals[[1L]]
+      } else {
+        ""
+      }
+      shiny::updateSelectInput(session, "upset_deg_list", choices = upset_deg_ch, selected = upset_deg_sel)
+    } else {
+      shiny::updateSelectInput(session, "upset_deg_list", choices = c("(no DEG lists)" = ""), selected = "")
+    }
+
+    n_tasks <- if (length(vis_sids) > 0L) {
+      length(ora_build_deg_tasks(vis_sids, sc$study_labels, deg_by_study = sc$deg_by_study))
+    } else {
+      1L
+    }
+    n_tasks <- max(1L, as.integer(n_tasks))
+    shiny::updateNumericInput(session, "upset_max_degree", max = max(8L, n_tasks))
+  }
+
+  visibility_signature <- shiny::reactive({
+    vis <- config_visibility()
+    list(
+      study_ids = vis$study_ids,
+      deg_by_study = vis$deg_by_study
+    )
+  })
+
+  shiny::observeEvent(visibility_signature(), {
+    sync_sidebar_to_visibility()
+  }, ignoreNULL = FALSE)
+
   gene_jump_symbol <- shiny::reactiveVal(NULL)
 
   geneTabServer(
     "gene",
-    study_ids,
-    stats::setNames(study_labels, study_ids),
-    external_symbol = shiny::reactive(gene_jump_symbol())
+    study_ids = shiny::reactive(app_scope()$study_ids),
+    study_labels = shiny::reactive(app_scope()$study_labels),
+    external_symbol = shiny::reactive(gene_jump_symbol()),
+    deg_by_study = shiny::reactive(app_scope()$deg_by_study)
   )
 
   upset_refresh_n <- shiny::reactiveVal(0L)
@@ -594,7 +735,8 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   shiny::observeEvent(input$upset_thr_apply_all, {
-    tasks <- ora_build_deg_tasks(study_ids, stats::setNames(study_labels, study_ids), deg_filter = NULL)
+    sc <- app_scope()
+    tasks <- ora_build_deg_tasks(sc$study_ids, sc$study_labels, deg_filter = NULL, deg_by_study = sc$deg_by_study)
     if (length(tasks) < 1L) {
       shiny::showNotification("No DEG lists found in config.", type = "warning")
       return()
@@ -629,16 +771,11 @@ server <- function(input, output, session) {
 
   shiny::observeEvent(input$upset_study, {
     if (is.null(input$upset_study) || !nzchar(input$upset_study)) return()
-    lists <- study_deg_lists(input$upset_study)
-    if (length(lists) < 1L) {
-      shiny::updateSelectInput(session, "upset_deg_list", choices = c("(no DEG lists)" = ""), selected = "")
-      return()
-    }
-    ch <- stats::setNames(
-      vapply(lists, function(x) x$deg_file, character(1L)),
-      vapply(lists, function(x) x$label, character(1L))
-    )
-    shiny::updateSelectInput(session, "upset_deg_list", choices = ch, selected = lists[[1L]]$deg_file)
+    sc <- app_scope()
+    ch <- visible_deg_choices_for_study(input$upset_study, sc$deg_by_study)
+    deg_vals <- unname(ch)
+    sel <- if (length(deg_vals) > 0L && nzchar(deg_vals[[1L]])) deg_vals[[1L]] else ""
+    shiny::updateSelectInput(session, "upset_deg_list", choices = ch, selected = sel)
   }, ignoreNULL = FALSE)
 
   shiny::observeEvent(list(input$upset_study, input$upset_deg_list), {
@@ -700,8 +837,8 @@ server <- function(input, output, session) {
     if (!is.character(rs) || length(rs) != 1L || !nzchar(rs)) rs <- "study"
     if (identical(rs, "set_size")) rs <- "intersect_max"
     if (!rs %in% c("study", "intersect_max")) rs <- "study"
-    mis <- suppressWarnings(as.numeric(input$upset_min_intersection %||% 0))
-    if (length(mis) != 1L || is.na(mis) || mis < 0) mis <- 0
+    mis <- suppressWarnings(as.numeric(input$upset_min_intersection %||% 1))
+    if (length(mis) != 1L || is.na(mis) || mis < 1) mis <- 1
     mis <- min(mis, 1e7)
     list(
       max_degree = md,
@@ -734,10 +871,11 @@ server <- function(input, output, session) {
 
   upsetTabServer(
     "upset",
-    study_ids,
-    stats::setNames(study_labels, study_ids),
+    study_ids = shiny::reactive(app_scope()$study_ids),
+    study_labels = shiny::reactive(app_scope()$study_labels),
     upset_tab_cfg,
     upset_thr_overrides,
+    deg_by_study = shiny::reactive(app_scope()$deg_by_study),
     on_dot_click = function(sid, deg, genes) {
       if (!requireNamespace("shinydashboard", quietly = TRUE)) {
         return(invisible(NULL))
@@ -797,47 +935,170 @@ server <- function(input, output, session) {
     }
   )
 
-  ora_custom_ontology <- shiny::reactiveVal(list(active = FALSE, t2g = NULL))
-
-  shiny::observeEvent(input$ora_load_custom_ontology, {
-    shiny::req(input$ora_custom_ontology_xlsx)
-    pr <- parse_ontology_xlsx_for_ora(input$ora_custom_ontology_xlsx$datapath)
+  apply_custom_ontology_load <- function(pr, source_label) {
     if (!isTRUE(pr$ok)) {
       shiny::showNotification(
-        if (!is.null(pr$error) && nzchar(as.character(pr$error))) pr$error else "Failed to read custom ontology.",
+        if (!is.null(pr$error) && nzchar(as.character(pr$error))) pr$error else "Failed to read ontology.",
         type = "error"
       )
-      return()
+      return(FALSE)
     }
-    ora_custom_ontology(list(active = TRUE, t2g = pr$t2g))
+    custom_ontology(list(active = TRUE, t2g = pr$t2g, source = source_label))
     shiny::updateSelectInput(session, "ora-pathway_file", choices = c(" " = ""), selected = "")
     n_cat <- length(unique(pr$t2g$term))
-    message(
-      "[ORA debug] custom ontology loaded from ",
-      as.character(input$ora_custom_ontology_xlsx$name),
-      " categories=", n_cat,
-      " pairs=", nrow(pr$t2g),
-      " unique_genes=", length(unique(as.character(pr$t2g$gene))),
-      if (isTRUE(pr$swapped)) " swapped_columns=TRUE" else " swapped_columns=FALSE"
-    )
-    msg <- paste0("Custom ontology loaded: ", n_cat, " categories, ", nrow(pr$t2g), " gene–category pairs.")
+    if (identical(Sys.getenv("EXPRS_ORA_DEBUG", unset = ""), "1")) {
+      message(
+        "[ontology] loaded from ", source_label,
+        " categories=", n_cat,
+        " pairs=", nrow(pr$t2g),
+        " unique_genes=", length(unique(as.character(pr$t2g$gene))),
+        if (isTRUE(pr$swapped)) " swapped_columns=TRUE" else ""
+      )
+    }
+    msg <- paste0("Ontology loaded: ", n_cat, " categories, ", nrow(pr$t2g), " gene–category pairs (", source_label, ").")
     if (isTRUE(pr$swapped)) {
-      msg <- paste0(msg, " (Detected unnamed columns looked swapped; used column 2 as symbols, column 1 as categories.)")
+      msg <- paste0(msg, " (Unnamed columns looked swapped; used column 2 as symbols.)")
     }
     shiny::showNotification(msg, type = "message", duration = 10)
+    TRUE
+  }
+
+  custom_ontology <- shiny::reactiveVal(list(active = FALSE, t2g = NULL, source = NULL))
+  panels_generate_trigger <- shiny::reactiveVal(0L)
+
+  shiny::observeEvent(input$ontology_load, {
+    shiny::req(input$ontology_custom_file)
+    pr <- parse_ontology_file_for_ora(input$ontology_custom_file$datapath)
+    source_label <- as.character(input$ontology_custom_file$name)
+    apply_custom_ontology_load(pr, source_label)
   }, ignoreInit = TRUE)
 
-  shiny::observeEvent(input$ora_clear_custom_ontology, {
-    if (is.null(input$ora_clear_custom_ontology) || input$ora_clear_custom_ontology < 1) return()
-    message("[ORA debug] clear custom ontology clicked: n=", input$ora_clear_custom_ontology)
-    ora_custom_ontology(list(active = FALSE, t2g = NULL))
+  shiny::observeEvent(input$ontology_clear, {
+    if (is.null(input$ontology_clear) || input$ontology_clear < 1) return()
+    custom_ontology(list(active = FALSE, t2g = NULL, source = NULL))
     ch <- ora_file_choices
     if (!("" %in% unname(ch))) {
       ch <- c("Select a pathway database..." = "", ch)
     }
     shiny::updateSelectInput(session, "ora-pathway_file", choices = ch, selected = "")
-    shiny::showNotification("Custom ontology cleared.", type = "message")
+    shiny::showNotification("Ontology cleared.", type = "message")
   }, ignoreInit = TRUE)
+
+  output$ontology_status <- shiny::renderText({
+    co <- custom_ontology()
+    if (is.null(co) || !is.list(co) || !isTRUE(co$active) || is.null(co$t2g) || nrow(co$t2g) < 1L) {
+      return("No ontology loaded.")
+    }
+    src <- if (!is.null(co$source) && nzchar(as.character(co$source))) as.character(co$source) else "custom"
+    paste0(
+      length(unique(co$t2g$term)), " categories, ",
+      nrow(co$t2g), " pairs (", src, ")"
+    )
+  })
+
+  panels_matrix_choices <- shiny::reactive({
+    if (is.null(input$study) || !nzchar(input$study)) return(c("All matrices" = "__all__"))
+    panel_set <- load_gene_tab_study_panels(input$study)
+    if (is.null(panel_set) || length(panel_set$panels) < 1L) {
+      return(c("All matrices" = "__all__"))
+    }
+    if (length(panel_set$panels) < 2L) {
+      return(c("All matrices" = "__all__"))
+    }
+    labels <- vapply(panel_set$panels, function(p) {
+      if (!is.null(p$title) && nzchar(p$title)) as.character(p$title) else as.character(p$counts_file)
+    }, character(1L))
+    keys <- vapply(panel_set$panels, function(p) as.character(p$key), character(1L))
+    stats::setNames(c("__all__", keys), c("All matrices", labels))
+  })
+
+  output$panels_matrix_ui <- shiny::renderUI({
+    ch <- panels_matrix_choices()
+    if (length(ch) < 2L) return(NULL)
+    valid_keys <- unname(ch)
+    selected <- if (!is.null(input$panels_matrix) && input$panels_matrix %in% valid_keys) {
+      input$panels_matrix
+    } else {
+      "__all__"
+    }
+    selectInput("panels_matrix", label = "Expression matrix", choices = ch, selected = selected)
+  })
+
+  panels_matrix_key <- shiny::reactive({
+    ch <- panels_matrix_choices()
+    key <- if (is.null(input$panels_matrix) || !nzchar(input$panels_matrix)) {
+      "__all__"
+    } else {
+      as.character(input$panels_matrix)
+    }
+    valid_keys <- unname(ch)
+    if (!key %in% valid_keys) "__all__" else key
+  })
+
+  panels_sample_filter_spec <- shiny::reactive({
+    if (is.null(input$study) || !nzchar(input$study)) return(NULL)
+    ps <- load_gene_tab_study_panels(input$study)
+    if (is.null(ps) || length(ps$panels) < 1L) return(NULL)
+    meta <- ps$panels[[1L]]$metadata
+    if (is.null(meta) || nrow(meta) < 1L) return(NULL)
+    filter_col <- ps$cfg$gene_tab_facet
+    if (is.null(filter_col) || !nzchar(as.character(filter_col))) {
+      if ("Region" %in% colnames(meta)) {
+        filter_col <- "Region"
+      } else {
+        return(NULL)
+      }
+    } else {
+      filter_col <- as.character(filter_col)
+      if (!filter_col %in% colnames(meta)) return(NULL)
+    }
+    levels <- unique(as.character(meta[[filter_col]]))
+    levels <- levels[!is.na(levels) & nzchar(levels)]
+    if (length(levels) < 2L) return(NULL)
+    value <- input$panels_sample_filter
+    if (is.null(value) || !as.character(value) %in% levels) {
+      value <- levels[[1L]]
+    }
+    list(col = filter_col, value = as.character(value), levels = levels)
+  })
+
+  output$panels_sample_filter_ui <- shiny::renderUI({
+    spec <- panels_sample_filter_spec()
+    if (is.null(spec)) return(NULL)
+    selected <- if (!is.null(input$panels_sample_filter) && input$panels_sample_filter %in% spec$levels) {
+      input$panels_sample_filter
+    } else {
+      spec$value
+    }
+    selectInput(
+      "panels_sample_filter",
+      label = spec$col,
+      choices = spec$levels,
+      selected = selected
+    )
+  })
+
+  panels_input <- shiny::reactive({
+    list(
+      generate = if (is.null(input$panels_generate)) 0L else as.integer(input$panels_generate),
+      matrix_key = panels_matrix_key(),
+      sample_filter = panels_sample_filter_spec(),
+      pheno_order = NULL
+    )
+  })
+
+  open_panels_for_study <- function(study_id) {
+    sid <- trimws(as.character(study_id))
+    if (!nzchar(sid)) return(invisible(NULL))
+    if (sid %in% study_ids) {
+      shiny::updateSelectInput(session, "study", selected = sid)
+    }
+    panels_generate_trigger(isolate(panels_generate_trigger()) + 1L)
+    if (requireNamespace("shinydashboard", quietly = TRUE)) {
+      shinydashboard::updateTabItems(session, "navtabs", selected = "panels")
+    }
+    invisible(NULL)
+  }
 
   rv <- reactiveValues(
     current_res = NULL,
@@ -864,6 +1125,8 @@ server <- function(input, output, session) {
 
   info_panel_set <- shiny::reactive({
     if (is.null(input$study) || input$study == "") return(NULL)
+    sc <- app_scope()
+    if (!as.character(input$study) %in% sc$study_ids) return(NULL)
     load_gene_tab_study_panels(input$study)
   })
 
@@ -1151,11 +1414,12 @@ server <- function(input, output, session) {
 
   oraTabServer(
     "ora",
-    study_ids,
-    stats::setNames(study_labels, study_ids),
+    study_ids = shiny::reactive(app_scope()$study_ids),
+    study_labels = shiny::reactive(app_scope()$study_labels),
     ora_input,
+    deg_by_study = shiny::reactive(app_scope()$deg_by_study),
     copy_genes_trigger = shiny::reactive(input$ora_copy_visible_genes),
-    custom_ontology = shiny::reactive(ora_custom_ontology()),
+    custom_ontology = shiny::reactive(custom_ontology()),
     on_gene_select = function(symbol) {
       sym <- trimws(as.character(symbol))
       if (!nzchar(sym)) return(invisible(NULL))
@@ -1165,7 +1429,18 @@ server <- function(input, output, session) {
         shinydashboard::updateTabItems(session, "navtabs", selected = "gene")
       }
       invisible(NULL)
-    }
+    },
+    on_open_panels = open_panels_for_study
+  )
+
+  panelTabServer(
+    "panels",
+    study_id = shiny::reactive({
+      if (is.null(input$study)) "" else as.character(input$study)
+    }),
+    custom_ontology = shiny::reactive(custom_ontology()),
+    panels_input = panels_input,
+    generate_trigger = shiny::reactive(panels_generate_trigger())
   )
 
   # Dynamic title for result table: threshold-filtered genes, or sub-heatmap selection
@@ -1451,14 +1726,20 @@ server <- function(input, output, session) {
     })
   })
 
-  # When study changes, update DEG list dropdown to that study's lists (first selected).
+  # When study changes, update DEG list dropdown to that study's visible lists (first selected).
   observeEvent(input$study, {
     rv$current_res <- NULL
     rv$current_mm <- NULL
     rv$row_index <- NULL
     rv$selected_rows <- NULL
+    shiny::updateSelectInput(session, "panels_matrix", selected = "__all__")
     if (is.null(input$study) || input$study == "") return()
-    lists <- study_deg_lists(input$study)
+    sc <- app_scope()
+    if (!as.character(input$study) %in% sc$study_ids) {
+      updateSelectInput(session, "deg_list", choices = c("(no DEG lists)" = ""), selected = "")
+      return()
+    }
+    lists <- filter_deg_lists_visible(study_deg_lists(input$study), sc$deg_by_study[[input$study]])
     if (length(lists) == 0L) {
       updateSelectInput(session, "deg_list", choices = c("(no DEG lists)" = ""), selected = "")
       return()
@@ -1511,7 +1792,9 @@ server <- function(input, output, session) {
   # Load data when study or DEG list selection changes (runs on init so default study+list load).
   observeEvent(list(input$study, input$deg_list), {
     if (is.null(input$study) || input$study == "" || is.null(input$deg_list) || input$deg_list == "") return()
-    lists_chk <- study_deg_lists(input$study)
+    sc <- app_scope()
+    if (!input$study %in% sc$study_ids) return()
+    lists_chk <- filter_deg_lists_visible(study_deg_lists(input$study), sc$deg_by_study[[input$study]])
     if (length(lists_chk) < 1L) return()
     deg_ok <- vapply(lists_chk, function(x) x$deg_file, character(1L))
     if (!input$deg_list %in% deg_ok) return()

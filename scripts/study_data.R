@@ -40,6 +40,67 @@ study_deg_lists <- function(study_id) {
   study_deg_lists_from_cfg(cfg, study_id)
 }
 
+#' Catalog of studies and DEG lists for the Config tab (available scope).
+build_study_deg_catalog <- function(study_ids, study_labels) {
+  out <- list()
+  for (sid in as.character(study_ids)) {
+    lists <- study_deg_lists(sid)
+    if (length(lists) < 1L) next
+    slbl <- study_labels[[sid]]
+    if (is.null(slbl) || !nzchar(as.character(slbl))) slbl <- sid
+    out[[length(out) + 1L]] <- list(
+      study_id = sid,
+      study_label = as.character(slbl),
+      deg_entries = lists
+    )
+  }
+  out
+}
+
+#' All studies and deg_file paths enabled (session default).
+default_visibility_state <- function(catalog) {
+  study_ids <- vapply(catalog, function(x) x$study_id, character(1L))
+  deg_by_study <- stats::setNames(vector("list", length(study_ids)), study_ids)
+  for (item in catalog) {
+    sid <- item$study_id
+    deg_by_study[[sid]] <- vapply(item$deg_entries, function(e) as.character(e$deg_file), character(1L))
+  }
+  list(study_ids = study_ids, deg_by_study = deg_by_study)
+}
+
+#' Subset deg list entries to visible deg_file paths.
+#' When `visible_deg_files` is NULL, returns `lists` unchanged (no filter).
+filter_deg_lists_visible <- function(lists, visible_deg_files) {
+  if (is.null(lists) || length(lists) < 1L) return(list())
+  if (is.null(visible_deg_files)) return(lists)
+  if (length(visible_deg_files) < 1L) return(list())
+  vis <- as.character(visible_deg_files)
+  keep <- vapply(lists, function(e) {
+    df <- as.character(if (is.null(e$deg_file)) "" else e$deg_file)
+    nzchar(df) && df %in% vis
+  }, logical(1L))
+  lists[keep]
+}
+
+#' Parse Config tab checkbox inputs into visible study_ids and deg_by_study.
+parse_visibility_from_inputs <- function(catalog, input, ns_prefix = "") {
+  study_ids <- character(0)
+  deg_by_study <- list()
+  for (item in catalog) {
+    sid <- item$study_id
+    study_in <- input[[paste0(ns_prefix, "study_", sid)]]
+    if (!isTRUE(study_in)) next
+    all_deg <- vapply(item$deg_entries, function(e) as.character(e$deg_file), character(1L))
+    deg_in <- input[[paste0(ns_prefix, "deg_", sid)]]
+    if (is.null(deg_in)) deg_in <- character(0)
+    deg_in <- intersect(as.character(deg_in), all_deg)
+    if (length(deg_in) < 1L) next
+    study_ids <- c(study_ids, sid)
+    deg_by_study[[sid]] <- deg_in
+  }
+  list(study_ids = study_ids, deg_by_study = deg_by_study)
+}
+
 # ColorBrewer qualitative "Set3" (n <= 12); recycle in order if more studies.
 .study_palette_set3 <- function(n) {
   n <- max(1L, as.integer(n))
@@ -552,5 +613,110 @@ load_gene_tab_gdegs <- function(study_id) {
   }
   assign(cache_key, tab, envir = .gene_tab_cache)
   tab
+}
+
+.read_deg_table_for_symbol_map <- function(study_id, deg_rel) {
+  cache_key <- paste0("deg_symbol_map|", study_id, "|", deg_rel)
+  if (exists(cache_key, envir = .study_data_cache, inherits = FALSE)) {
+    return(get(cache_key, envir = .study_data_cache, inherits = FALSE))
+  }
+  path <- file.path("data", study_id, deg_rel)
+  if (!file.exists(path)) return(NULL)
+  tab <- read.table(path, sep = "\t", header = TRUE, check.names = FALSE, stringsAsFactors = FALSE)
+  assign(cache_key, tab, envir = .study_data_cache)
+  tab
+}
+
+.add_symbol_id_pairs <- function(sym_to_id, sym_vec, id_vec) {
+  sym_vec <- toupper(trimws(as.character(sym_vec)))
+  id_vec <- as.character(id_vec)
+  ok <- !is.na(sym_vec) & nzchar(sym_vec) & !is.na(id_vec) & nzchar(id_vec)
+  if (!any(ok)) return(sym_to_id)
+  sym_vec <- sym_vec[ok]
+  id_vec <- id_vec[ok]
+  new_mask <- !sym_vec %in% names(sym_to_id)
+  if (!any(new_mask)) return(sym_to_id)
+  sym_new <- sym_vec[new_mask]
+  id_new <- id_vec[new_mask]
+  keep <- !duplicated(sym_new)
+  sym_to_id[sym_new[keep]] <- id_new[keep]
+  sym_to_id
+}
+
+#' Cached symbol -> matrix row ID map from DEG tables and optional `gdegs_file`.
+study_symbol_to_matrix_id_map <- function(study_id) {
+  if (is.null(study_id) || !nzchar(study_id)) return(character(0))
+  cache_key <- paste0("symbol_to_id|", study_id)
+  if (exists(cache_key, envir = .study_data_cache, inherits = FALSE)) {
+    return(get(cache_key, envir = .study_data_cache, inherits = FALSE))
+  }
+  sym_to_id <- character(0)
+  lists <- study_deg_lists(study_id)
+  for (entry in lists) {
+    deg_rel <- entry$deg_file
+    if (is.null(deg_rel) || !nzchar(deg_rel)) next
+    res <- .read_deg_table_for_symbol_map(study_id, deg_rel)
+    if (is.null(res)) next
+    if (all(c("symbol", "ens_gene") %in% colnames(res))) {
+      sym_to_id <- .add_symbol_id_pairs(sym_to_id, res$symbol, res$ens_gene)
+    } else if ("symbol" %in% colnames(res) && !is.null(rownames(res)) && nzchar(rownames(res)[[1L]])) {
+      sym_to_id <- .add_symbol_id_pairs(sym_to_id, res$symbol, rownames(res))
+    }
+  }
+  gdegs <- load_gene_tab_gdegs(study_id)
+  if (!is.null(gdegs) && all(c("symbol", "ens_gene") %in% colnames(gdegs))) {
+    sym_to_id <- .add_symbol_id_pairs(sym_to_id, gdegs$symbol, gdegs$ens_gene)
+  }
+  assign(cache_key, sym_to_id, envir = .study_data_cache)
+  sym_to_id
+}
+
+#' Map gene symbols to expression-matrix row IDs for one study.
+#'
+#' Uses DEG tables, optional `gdegs_file`, then case-insensitive rowname match on `mm`.
+#' @param matrix_ids Optional character vector of matrix row IDs (avoids passing full `mm`).
+#' @return data.frame with columns `symbol`, `matrix_id`, `found` (logical).
+resolve_symbols_in_study_matrix <- function(study_id, symbols, mm = NULL, matrix_ids = NULL) {
+  symbols <- unique(toupper(trimws(as.character(symbols))))
+  symbols <- symbols[!is.na(symbols) & nzchar(symbols)]
+  if (length(symbols) < 1L) {
+    return(data.frame(symbol = character(0), matrix_id = character(0), found = logical(0), stringsAsFactors = FALSE))
+  }
+
+  sym_to_id <- if (!is.null(study_id) && nzchar(study_id)) {
+    study_symbol_to_matrix_id_map(study_id)
+  } else {
+    character(0)
+  }
+
+  matrix_id <- sym_to_id[symbols]
+  names(matrix_id) <- symbols
+  matrix_id[is.na(matrix_id)] <- NA_character_
+
+  if (!is.null(matrix_ids)) {
+    rn <- as.character(matrix_ids)
+  } else if (!is.null(mm) && nrow(mm) > 0L) {
+    rn <- rownames(mm)
+  } else {
+    rn <- NULL
+  }
+  if (!is.null(rn)) {
+    rn_map <- stats::setNames(rn, tolower(rn))
+    miss <- is.na(matrix_id) | !nzchar(matrix_id)
+    if (any(miss)) {
+      for (sym in symbols[miss]) {
+        key <- tolower(sym)
+        if (!key %in% names(rn_map)) next
+        hit <- rn_map[[key]]
+        if (!is.null(hit) && nzchar(hit)) matrix_id[[sym]] <- hit
+      }
+    }
+  }
+
+  found <- !is.na(matrix_id) & nzchar(matrix_id)
+  if (!is.null(rn)) {
+    found <- found & matrix_id %in% rn
+  }
+  data.frame(symbol = symbols, matrix_id = unname(matrix_id), found = found, stringsAsFactors = FALSE)
 }
 

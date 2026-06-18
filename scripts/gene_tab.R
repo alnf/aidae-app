@@ -99,10 +99,14 @@ read_deg_table_cached <- function(study_id, deg_rel) {
 }
 
 #' Union of `symbol` values from all DEG lists across studies (for selectize).
-collect_all_gene_symbols <- function(study_ids) {
+#' @param deg_by_study Optional named list study_id -> visible deg_file paths.
+collect_all_gene_symbols <- function(study_ids, deg_by_study = NULL) {
   syms <- character(0)
   for (sid in study_ids) {
     lists <- study_deg_lists(sid)
+    if (!is.null(deg_by_study)) {
+      lists <- filter_deg_lists_visible(lists, deg_by_study[[sid]])
+    }
     for (entry in lists) {
       deg_rel <- entry$deg_file
       if (is.null(deg_rel) || deg_rel == "") next
@@ -218,41 +222,180 @@ geneTabUI <- function(id, study_ids, study_labels) {
           )
         ),
         shiny::tags$hr(),
-        shiny::tags$div(lapply(study_ids, function(sid) {
-          lbl <- study_labels[[sid]]
-          if (is.null(lbl) || !nzchar(as.character(lbl))) lbl <- sid
-          shiny::tags$div(
-            class = "mb-3",
-            shiny::h4(as.character(lbl), class = "text-primary", style = "margin-bottom:6px;"),
-            shiny::uiOutput(ns(paste0("gene_plot_container_", sid)))
-          )
-        }))
+        shiny::uiOutput(ns("study_sections"))
       )
     )
   )
 }
 
-geneTabServer <- function(id, study_ids, study_labels, external_symbol = NULL) {
+geneTabServer <- function(id, study_ids, study_labels, external_symbol = NULL, deg_by_study = NULL) {
   shiny::moduleServer(id, function(input, output, session) {
+    app_scope <- function() {
+      list(
+        study_ids = if (is.function(study_ids)) study_ids() else study_ids,
+        study_labels = if (is.function(study_labels)) study_labels() else study_labels,
+        deg_by_study = if (is.function(deg_by_study)) deg_by_study() else deg_by_study
+      )
+    }
+
     gene_choices <- shiny::reactiveVal(character(0))
+    registered_studies <- shiny::reactiveVal(character(0))
+
+    register_study_plots <- function(study_id) {
+      panel_set <- load_gene_tab_study_panels(study_id)
+      container_name <- paste0("gene_plot_container_", study_id)
+      output[[container_name]] <- shiny::renderUI({
+        sc <- app_scope()
+        if (!study_id %in% sc$study_ids) return(NULL)
+        ps <- load_gene_tab_study_panels(study_id)
+        if (is.null(ps) || length(ps$panels) < 1L) {
+          return(shiny::tags$div(class = "text-muted", "Could not load counts/metadata for this study."))
+        }
+        is_grouped <- identical(ps$mode, "grouped")
+        ui_blocks <- list()
+        for (i in seq_along(ps$panels)) {
+          panel <- ps$panels[[i]]
+          out_id <- .gene_tab_panel_output_id(study_id, panel$key)
+          if (is_grouped) {
+            ui_blocks[[length(ui_blocks) + 1L]] <- shiny::tags$div(
+              class = "text-muted",
+              style = "font-size: 0.9rem; margin: 0 0 6px 0;",
+              panel$title
+            )
+          }
+          ui_blocks[[length(ui_blocks) + 1L]] <- shiny::tags$div(
+            style = "overflow-x: auto; width: 100%; margin-bottom: 10px;",
+            shiny::tags$div(
+              style = "display: inline-block;",
+              shiny::plotOutput(session$ns(out_id), width = "auto", height = "auto")
+            )
+          )
+        }
+        shiny::tagList(ui_blocks)
+      })
+
+      if (is.null(panel_set) || length(panel_set$panels) < 1L) return()
+
+      for (panel in panel_set$panels) {
+        local({
+          panel_data <- panel
+          panel_key <- panel$key
+          panel_mode <- panel_set$mode
+          panel_cfg <- panel_set$cfg
+          out_id <- .gene_tab_panel_output_id(study_id, panel_key)
+          output[[out_id]] <- shiny::renderPlot(
+            {
+              sc <- app_scope()
+              if (!study_id %in% sc$study_ids) {
+                return(.gene_tab_msg_plot("Study hidden in Config."))
+              }
+              slbl <- sc$study_labels[[study_id]]
+              if (is.null(slbl) || !nzchar(as.character(slbl))) slbl <- study_id
+              sym_raw <- input$symbol
+              if (is.null(sym_raw)) sym_raw <- ""
+              sym <- trimws(sym_raw)
+              if (!nzchar(sym)) {
+                return(.gene_tab_msg_plot("Enter a gene symbol."))
+              }
+              ens <- resolve_ens_for_symbol_in_study(sym, study_id)
+              if (is.null(ens)) {
+                return(plot_gene_study(
+                  ens_gene = "__not_in_study__",
+                  mm = panel_data$mm,
+                  metadata = panel_data$metadata,
+                  gene_symbol = sym,
+                  study_title = if (identical(panel_mode, "grouped")) panel_data$title else slbl,
+                  is_count_like = isTRUE(panel_data$is_count_like)
+                ))
+              }
+              gdegs <- load_gene_tab_gdegs(study_id)
+              pv <- if (!is.null(gdegs) && nrow(gdegs) > 0L && "ens_gene" %in% colnames(gdegs)) {
+                sub <- gdegs[as.character(gdegs$ens_gene) == ens, , drop = FALSE]
+                if (identical(panel_mode, "grouped") && "joint" %in% colnames(sub) && length(panel_data$labels) > 0L) {
+                  sub <- sub[as.character(sub$joint) %in% panel_data$labels, , drop = FALSE]
+                }
+                sub
+              } else {
+                NULL
+              }
+              fc <- panel_cfg$gene_tab_facet
+              if (is.null(fc) || !nzchar(as.character(fc))) {
+                fc <- NULL
+              } else {
+                fc <- as.character(fc)
+              }
+              plot_gene_study(
+                ens_gene = ens,
+                mm = panel_data$mm,
+                metadata = panel_data$metadata,
+                gene_symbol = sym,
+                pval_df = pv,
+                study_title = if (identical(panel_mode, "grouped")) panel_data$title else slbl,
+                facet_column = fc,
+                is_count_like = isTRUE(panel_data$is_count_like)
+              )
+            },
+            height = function() {
+              s <- input$symbol
+              if (is.null(s)) s <- ""
+              panel_data$study_id <- study_id
+              .gene_tab_plot_height_px(s, panel_data)
+            },
+            width = function() {
+              s <- input$symbol
+              if (is.null(s)) s <- ""
+              panel_data$study_id <- study_id
+              .gene_tab_plot_width_px(s, panel_data, panel_cfg)
+            }
+          )
+        })
+      }
+    }
 
     shiny::observe({
-      syms <- collect_all_gene_symbols(study_ids)
+      sc <- app_scope()
+      syms <- collect_all_gene_symbols(sc$study_ids, sc$deg_by_study)
       gene_choices(syms)
+      cur <- input$symbol
+      sel <- if (!is.null(cur) && nzchar(trimws(cur)) && trimws(cur) %in% syms) trimws(cur) else character(0)
       shiny::updateSelectizeInput(
         session, "symbol",
         choices = syms,
-        selected = character(0),
+        selected = sel,
         server = TRUE
       )
-    }) # runs once: no reactive inputs inside
+      new_sids <- setdiff(sc$study_ids, registered_studies())
+      if (length(new_sids) > 0L) {
+        for (sid in new_sids) {
+          register_study_plots(sid)
+        }
+        registered_studies(unique(c(registered_studies(), new_sids)))
+      }
+    })
+
+    output$study_sections <- shiny::renderUI({
+      sc <- app_scope()
+      if (length(sc$study_ids) < 1L) {
+        return(shiny::tags$div(class = "text-muted", "No studies visible. Enable studies on the Config tab."))
+      }
+      shiny::tagList(lapply(sc$study_ids, function(sid) {
+        lbl <- sc$study_labels[[sid]]
+        if (is.null(lbl) || !nzchar(as.character(lbl))) lbl <- sid
+        shiny::tags$div(
+          class = "mb-3",
+          shiny::h4(as.character(lbl), class = "text-primary", style = "margin-bottom:6px;"),
+          shiny::uiOutput(session$ns(paste0("gene_plot_container_", sid)))
+        )
+      }))
+    })
 
     output$gene_info <- shiny::renderUI({
+      sc <- app_scope()
       sym_raw <- input$symbol
       if (is.null(sym_raw)) sym_raw <- ""
       sym <- trimws(sym_raw)
       if (!nzchar(sym)) return(NULL)
-      info <- fetch_gene_info_from_degs(sym, study_ids)
+      info <- fetch_gene_info_from_degs(sym, sc$study_ids)
       if (is.null(info)) {
         return(shiny::HTML("<div style='color:#e74c3c;padding:8px;'>No matching gene in any DEG table for this dashboard.</div>"))
       }
@@ -265,7 +408,8 @@ geneTabServer <- function(id, study_ids, study_labels, external_symbol = NULL) {
       if (!nzchar(sym)) return()
       choices <- gene_choices()
       if (length(choices) < 1L) {
-        choices <- collect_all_gene_symbols(study_ids)
+        sc <- app_scope()
+        choices <- collect_all_gene_symbols(sc$study_ids, sc$deg_by_study)
         gene_choices(choices)
       }
       key <- tolower(sym)
@@ -279,108 +423,5 @@ geneTabServer <- function(id, study_ids, study_labels, external_symbol = NULL) {
         server = TRUE
       )
     }, ignoreInit = TRUE)
-
-    for (sid in study_ids) {
-      local({
-        study_id <- sid
-        container_name <- paste0("gene_plot_container_", study_id)
-        output[[container_name]] <- shiny::renderUI({
-          panel_set <- load_gene_tab_study_panels(study_id)
-          if (is.null(panel_set) || length(panel_set$panels) < 1L) {
-            return(shiny::tags$div(class = "text-muted", "Could not load counts/metadata for this study."))
-          }
-          is_grouped <- identical(panel_set$mode, "grouped")
-          ui_blocks <- list()
-          for (i in seq_along(panel_set$panels)) {
-            panel <- panel_set$panels[[i]]
-            out_id <- .gene_tab_panel_output_id(study_id, panel$key)
-            if (is_grouped) {
-              ui_blocks[[length(ui_blocks) + 1L]] <- shiny::tags$div(
-                class = "text-muted",
-                style = "font-size: 0.9rem; margin: 0 0 6px 0;",
-                panel$title
-              )
-            }
-            ui_blocks[[length(ui_blocks) + 1L]] <- shiny::tags$div(
-              style = "overflow-x: auto; width: 100%; margin-bottom: 10px;",
-              shiny::tags$div(
-                style = "display: inline-block;",
-                shiny::plotOutput(session$ns(out_id), width = "auto", height = "auto")
-              )
-            )
-          }
-          shiny::tagList(ui_blocks)
-        })
-
-        shiny::observe({
-          panel_set <- load_gene_tab_study_panels(study_id)
-          if (is.null(panel_set) || length(panel_set$panels) < 1L) return()
-          for (panel in panel_set$panels) {
-            local({
-              panel_data <- panel
-              panel_data$study_id <- study_id
-              out_id <- .gene_tab_panel_output_id(study_id, panel_data$key)
-              output[[out_id]] <- shiny::renderPlot(
-                {
-                  sym_raw <- input$symbol
-                  if (is.null(sym_raw)) sym_raw <- ""
-                  sym <- trimws(sym_raw)
-                  if (!nzchar(sym)) {
-                    return(.gene_tab_msg_plot("Enter a gene symbol."))
-                  }
-                  ens <- resolve_ens_for_symbol_in_study(sym, study_id)
-                  if (is.null(ens)) {
-                    return(plot_gene_study(
-                      ens_gene = "__not_in_study__",
-                      mm = panel_data$mm,
-                      metadata = panel_data$metadata,
-                      gene_symbol = sym,
-                      study_title = if (identical(panel_set$mode, "grouped")) panel_data$title else study_labels[[study_id]],
-                      is_count_like = isTRUE(panel_data$is_count_like)
-                    ))
-                  }
-                  gdegs <- load_gene_tab_gdegs(study_id)
-                  pv <- if (!is.null(gdegs) && nrow(gdegs) > 0L && "ens_gene" %in% colnames(gdegs)) {
-                    sub <- gdegs[as.character(gdegs$ens_gene) == ens, , drop = FALSE]
-                    if (identical(panel_set$mode, "grouped") && "joint" %in% colnames(sub) && length(panel_data$labels) > 0L) {
-                      sub <- sub[as.character(sub$joint) %in% panel_data$labels, , drop = FALSE]
-                    }
-                    sub
-                  } else {
-                    NULL
-                  }
-                  fc <- panel_set$cfg$gene_tab_facet
-                  if (is.null(fc) || !nzchar(as.character(fc))) {
-                    fc <- NULL
-                  } else {
-                    fc <- as.character(fc)
-                  }
-                  plot_gene_study(
-                    ens_gene = ens,
-                    mm = panel_data$mm,
-                    metadata = panel_data$metadata,
-                    gene_symbol = sym,
-                    pval_df = pv,
-                    study_title = if (identical(panel_set$mode, "grouped")) panel_data$title else study_labels[[study_id]],
-                    facet_column = fc,
-                    is_count_like = isTRUE(panel_data$is_count_like)
-                  )
-                },
-                height = function() {
-                  s <- input$symbol
-                  if (is.null(s)) s <- ""
-                  .gene_tab_plot_height_px(s, panel_data)
-                },
-                width = function() {
-                  s <- input$symbol
-                  if (is.null(s)) s <- ""
-                  .gene_tab_plot_width_px(s, panel_data, panel_set$cfg)
-                }
-              )
-            })
-          }
-        })
-      })
-    }
   })
 }

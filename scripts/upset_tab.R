@@ -751,18 +751,28 @@ upsetTabUI <- function(id) {
 #' @param thr_overrides_parent `reactiveValues()` from parent; updated on Refresh before `cfg()$refresh` increments.
 #' @param on_dot_click Optional `function(study_id, deg_file, genes_chr)` when user clicks
 #'   an active dot in the intersection matrix (opens DEGs tab with that list + intersection genes).
-upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_parent, on_dot_click = NULL) {
+#' @param deg_by_study reactive or static named list: study_id -> visible deg_file paths
+upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_parent, on_dot_click = NULL, deg_by_study = NULL) {
   shiny::moduleServer(id, function(input, output, session) {
+    app_scope <- function() {
+      list(
+        study_ids = if (is.function(study_ids)) study_ids() else study_ids,
+        study_labels = if (is.function(study_labels)) study_labels() else study_labels,
+        deg_by_study = if (is.function(deg_by_study)) deg_by_study() else deg_by_study
+      )
+    }
+
     thr_overrides <- thr_overrides_parent
     last_payload <- shiny::reactiveVal(NULL)
 
     upset_payload <- shiny::reactive({
+      sc <- app_scope()
       cfg()$max_degree
       cfg()$min_intersection
       cfg()$refresh
       cfg()$row_sort
       ov <- shiny::reactiveValuesToList(thr_overrides)
-      tasks <- ora_build_deg_tasks(study_ids, study_labels, deg_filter = NULL)
+      tasks <- ora_build_deg_tasks(sc$study_ids, sc$study_labels, deg_filter = NULL, deg_by_study = sc$deg_by_study)
       pl <- .upset_build_wide_matrix(tasks, ov)
       if (!isTRUE(pl$ok)) {
         return(pl)
@@ -775,7 +785,7 @@ upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_paren
       max_deg <- max(2L, max_deg)
 
       min_sz <- suppressWarnings(as.numeric(cfg()$min_intersection))
-      if (length(min_sz) != 1L || is.na(min_sz) || min_sz < 0) min_sz <- 0
+      if (length(min_sz) != 1L || is.na(min_sz) || min_sz < 1) min_sz <- 1
       min_sz <- min(min_sz, 1e7)
 
       ch <- .upset_comb_from_pl(pl, max_deg, row_sort = cfg()$row_sort %||% "study")
@@ -838,7 +848,7 @@ upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_paren
       pl$set_order_ch <- ch$set_order
       pl$max_degree <- max_deg
       pl$min_intersection <- min_sz
-      scm <- study_color_map_for_labels(study_ids, study_labels)
+      scm <- study_color_map_for_labels(sc$study_ids, sc$study_labels)
       int_ids <- as.character(ud$plot_intersections_subset %||% character(0))
       int_deg <- .upset_cu_intersection_degrees(int_ids)
       int_labs <- .upset_cu_intersection_pretty_labels(int_ids, ud)
@@ -890,18 +900,18 @@ upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_paren
         nset <- ncol(pl$cu$mat)
         nint <- pl$cu$n_intersections %||% 0L
         int_set <- pl$cu$intersections_setting %||% "observed"
-        min_i <- pl$min_intersection %||% 0
+        min_i <- pl$min_intersection %||% 1
         pair_note <- if (identical(int_set, "all")) {
-          " Every pair of lists has a column (inclusive intersect sizes; zero allowed). "
+          " Every pair of lists with ≥1 shared gene has a column (inclusive intersect). "
         } else if (identical(pl$max_degree, 2L)) {
           " Pair grid omitted (too many lists for full pair matrix); showing observed intersections only. "
         } else {
           " "
         }
-        min_note <- if (is.numeric(min_i) && is.finite(min_i) && min_i > 0) {
+        min_note <- if (is.numeric(min_i) && is.finite(min_i) && min_i > 1) {
           paste0(" Minimum intersection size ≥ ", as.integer(min_i), ". ")
         } else {
-          " "
+          " Empty intersections (0 genes) are never shown. "
         }
         shiny::tags$div(
           class = "text-muted",
@@ -1011,7 +1021,7 @@ upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_paren
         intersect = colnames(mat),
         name = "Intersection",
         mode = "intersect",
-        min_size = pl$min_intersection %||% 0,
+        min_size = pl$min_intersection %||% 1,
         min_degree = 2,
         max_degree = pl$max_degree,
         intersections = int_sets,
