@@ -752,7 +752,7 @@ upsetTabUI <- function(id) {
 #' @param on_dot_click Optional `function(study_id, deg_file, genes_chr)` when user clicks
 #'   an active dot in the intersection matrix (opens DEGs tab with that list + intersection genes).
 #' @param deg_by_study reactive or static named list: study_id -> visible deg_file paths
-upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_parent, on_dot_click = NULL, deg_by_study = NULL) {
+upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_parent, on_dot_click = NULL, deg_by_study = NULL, thr_sidebar = NULL) {
   shiny::moduleServer(id, function(input, output, session) {
     app_scope <- function() {
       list(
@@ -764,6 +764,15 @@ upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_paren
 
     thr_overrides <- thr_overrides_parent
     last_payload <- shiny::reactiveVal(NULL)
+
+    upset_download_basename <- function(kind) {
+      c <- cfg()
+      thr <- if (is.function(thr_sidebar)) thr_sidebar() else default_heatmap_thresholds()
+      upset_plot_basename(
+        kind, c$max_degree, c$min_intersection,
+        thr$fdr, thr$log2fc, thr$base_mean, thr$svalue
+      )
+    }
 
     upset_payload <- shiny::reactive({
       sc <- app_scope()
@@ -1065,7 +1074,8 @@ upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_paren
               "text-align:left;line-height:1.45;font-size:15px;"
             )
           ),
-          ggiraph::opts_sizing(rescale = FALSE)
+          ggiraph::opts_sizing(rescale = FALSE),
+          ggiraph_toolbar_pngname(upset_download_basename("intersections"))
         )
       )
     })

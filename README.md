@@ -130,6 +130,8 @@ The ORA dot plot is interactive with **ggiraph**:
 - click a dot and interpret it as **Pathway (row intent)** to build a heatplot of pathway genes x all study comparisons (cell = `log2FC`);
 - click a dot and interpret it as **Comparison (column intent)** to build a classical heatplot of pathways x genes for the selected comparison (cell = `log2FC`).
 
+**Plot downloads:** interactive **ggiraph** plots use the built-in toolbar download button; filenames are set via `pngname` (e.g. `degs-heart-DE_a-padj0.05-lfc1-heatmap.png`, `ora-KEGG-ol10-ct5-gr0.1-padj0.05-pv1-top20-dotplot.png`). **InteractiveComplexHeatmap** “Save image” on the DEGs tab gets the same contextual basename (SVG/PDF/PNG per toolbar choice). Parameter keys include `padj`, `lfc`, `bm` / `sv`, `ol` / `ct` / `gr` / `pv` / `top`, `deg` / `min`.
+
 Sidebar filters for ORA include minimum overlap count, minimum pathway size, minimum gene ratio, and **maximum adjusted p-value (FDR)**. Default FDR cutoff is `1` (no FDR filtering), so behavior stays as before unless you choose a stricter threshold. Top-`N` pathway display still follows existing ranking by enrichment significance (`p_adj` / p-value order).
 
 **Parallel ORA (optional):** work is split with `parallel::mclapply` (forking on Unix/macOS; Windows stays effectively sequential). Set **`EXPRS_ORA_WORKERS`** to an integer ≥ `2`, or use **`scripts/precompute_ora.R --cores N`**. The effective worker count is capped by `parallel::detectCores()` (logical CPUs) and by the **number of parallel tasks** at the active layer (set workers lower if you want to leave cores free).

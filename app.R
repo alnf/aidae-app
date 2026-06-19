@@ -14,6 +14,7 @@ source("scripts/heatmap_utils.R")
 source("scripts/result_table_indices.R")
 source("scripts/study_data.R")
 source("scripts/perf_utils.R")
+source("scripts/plot_filename.R")
 source("scripts/gene_plot.R")
 source("scripts/gene_tab.R")
 source("scripts/pathway_signatures.R")
@@ -186,6 +187,17 @@ body <- dashboardBody(
           ta.select();
           try { document.execCommand('copy'); } catch (err) { console.error(err); }
           document.body.removeChild(ta);
+        }
+      });
+      Shiny.addCustomMessageHandler('exprs_ich_download_name', function(msg) {
+        if (!msg || !msg.control_id || !msg.basename) return;
+        var control = document.getElementById(msg.control_id);
+        if (!control) return;
+        var sel = control.querySelector('select[id$=\"_download_format\"]');
+        var ext = sel ? sel.value.toLowerCase() : 'png';
+        var links = control.querySelectorAll('a[download]');
+        for (var j = 0; j < links.length; j++) {
+          links[j].setAttribute('download', msg.basename + '.' + ext);
         }
       });
     "))
@@ -867,6 +879,7 @@ server <- function(input, output, session) {
     study_labels = shiny::reactive(app_scope()$study_labels),
     upset_tab_cfg,
     upset_thr_overrides,
+    thr_sidebar = upset_thr_sidebar,
     deg_by_study = shiny::reactive(app_scope()$deg_by_study),
     on_dot_click = function(sid, deg, genes) {
       if (!requireNamespace("shinydashboard", quietly = TRUE)) {
@@ -1176,6 +1189,40 @@ server <- function(input, output, session) {
     )
   })
 
+  degs_download_basename <- function(plot_kind) {
+    res <- rv$current_res
+    d0 <- default_heatmap_thresholds()
+    custom <- rv$custom_genes
+    if (is.null(custom) || length(custom) < 1L) custom <- NULL
+    degs_plot_basename(
+      input$study, input$deg_list, plot_kind,
+      fdr = as.numeric(input$fdr),
+      log2fc = input$log2fc,
+      base_mean = if (!is.null(res) && "baseMean" %in% colnames(res)) {
+        as.numeric(input$base_mean %||% d0$base_mean)
+      } else {
+        NULL
+      },
+      svalue = if (!is.null(res) && "svalue" %in% colnames(res)) {
+        as.numeric(input$svalue %||% d0$svalue)
+      } else {
+        NULL
+      },
+      custom_genes = custom,
+      has_svalue_col = !is.null(res) && "svalue" %in% colnames(res),
+      has_base_mean_col = !is.null(res) && "baseMean" %in% colnames(res)
+    )
+  }
+
+  notify_ich_download_name <- function(which = c("main", "sub"), plot_kind) {
+    which <- match.arg(which)
+    control_id <- if (which == "sub") "ht_sub_heatmap_control" else "ht_heatmap_control"
+    session$sendCustomMessage("exprs_ich_download_name", list(
+      control_id = control_id,
+      basename = degs_download_basename(plot_kind)
+    ))
+  }
+
   output$info_pca_ui <- renderUI({
     ps <- info_panel_set()
     if (is.null(ps) || length(ps$panels) < 1L) {
@@ -1286,10 +1333,22 @@ server <- function(input, output, session) {
         }
         pd <- info_pca_data_one(panel$mm, panel$metadata, input$info_color_by, panel_title)
         out_id <- paste0("info_pca_", idx)
+        panel_key <- if (!is.null(panel$key) && nzchar(as.character(panel$key))) {
+          as.character(panel$key)
+        } else {
+          paste0("panel", idx)
+        }
+        pca_pngname <- info_pca_basename(input$study, panel_key, input$info_color_by)
         if (use_girafe) {
           output[[out_id]] <- ggiraph::renderGirafe({
             if (!isTRUE(pd$ok)) {
-              return(ggiraph::girafe(ggobj = info_pca_base_plot(pd, input$info_color_by)))
+              return(ggiraph::girafe(
+                ggobj = info_pca_base_plot(pd, input$info_color_by),
+                options = list(
+                  ggiraph::opts_sizing(rescale = FALSE),
+                  ggiraph_toolbar_pngname(pca_pngname)
+                )
+              ))
             }
             p <- ggplot2::ggplot(pd$pca_df, ggplot2::aes(x = PC1, y = PC2, color = ColorBy)) +
               ggiraph::geom_point_interactive(
@@ -1309,7 +1368,11 @@ server <- function(input, output, session) {
             ggiraph::girafe(
               ggobj = p,
               width_svg = 10,
-              height_svg = 4.8
+              height_svg = 4.8,
+              options = list(
+                ggiraph::opts_sizing(rescale = FALSE),
+                ggiraph_toolbar_pngname(pca_pngname)
+              )
             )
           })
         } else {
@@ -1538,6 +1601,7 @@ server <- function(input, output, session) {
     selected_idx_full <- which(sel)
     rv$row_index <- selected_idx_full[out$row_index]
     rv$selected_rows <- NULL
+    notify_ich_download_name("main", "heatmap")
     message("[perf] makeInteractiveComplexHeatmap (custom gene list): start; study=", input$study, " deg_list=", input$deg_list)
     perf_time(
       "makeInteractiveComplexHeatmap_custom_genes",
@@ -1837,6 +1901,7 @@ server <- function(input, output, session) {
     idx <- unique(unlist(df$row_index))
     selected <- row_index[idx]
     rv$selected_rows <- selected
+    notify_ich_download_name("sub", "subheatmap")
     output[["ma_plot"]] <- renderPlot({
       make_maplot(res, selected)
     })
@@ -1889,6 +1954,7 @@ server <- function(input, output, session) {
           if (!is.null(out)) {
             rv$row_index <- out$row_index
             rv$selected_rows <- NULL
+            notify_ich_download_name("main", "heatmap")
             message("[perf] makeInteractiveComplexHeatmap: start; study=", input$study, " deg_list=", input$deg_list)
             perf_time(
               "makeInteractiveComplexHeatmap",

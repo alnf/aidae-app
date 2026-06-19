@@ -1695,6 +1695,24 @@ oraTabServer <- function(
       message("[ORA debug] ", paste0(..., collapse = ""))
     }
 
+    ora_heatmap_download_basename <- function() {
+      sp <- selected_point()
+      shiny::req(!is.null(sp))
+      co <- if (is.function(custom_ontology)) custom_ontology() else NULL
+      oi <- ora_input()
+      pf <- if (is.null(input$pathway_file)) "" else as.character(input$pathway_file)
+      mode <- if (!is.null(oi$click_target) && identical(oi$click_target, "comparison")) {
+        "comparison"
+      } else {
+        "pathway"
+      }
+      if (identical(mode, "pathway")) {
+        ora_heatmap_pathway_basename(pf, co, oi, sp$pathway_desc)
+      } else {
+        ora_heatmap_comparison_basename(pf, co, oi, sp$study_id, sp$comparison)
+      }
+    }
+
     .ora_pick_discrete_index <- function(v, n) {
       if (is.null(v) || is.na(v)) return(NA_integer_)
       idx <- suppressWarnings(as.integer(round(as.numeric(v))))
@@ -2112,7 +2130,12 @@ oraTabServer <- function(
               css = "stroke:#39ff14;stroke-width:2.2px;"
             ),
             ggiraph::opts_hover(css = "stroke:#000;stroke-width:1.2px;"),
-            ggiraph::opts_sizing(rescale = FALSE)
+            ggiraph::opts_sizing(rescale = FALSE),
+            ggiraph_toolbar_pngname(ora_dotplot_basename(
+              if (is.null(input$pathway_file)) "" else as.character(input$pathway_file),
+              if (is.function(custom_ontology)) custom_ontology() else NULL,
+              ora_input()
+            ))
           )
         )
       })
@@ -2123,7 +2146,6 @@ oraTabServer <- function(
         sc <- app_scope()
         assay_type_by_label <- .ora_study_assay_types(sc$study_ids, sc$study_labels)
         d <- ora_combined_plot_df()
-        dims <- ora_dotplot_dims()
         if (!is.null(d$error)) {
           return(.ora_msg_plot(d$error))
         }
@@ -2377,7 +2399,8 @@ oraTabServer <- function(
               css = "stroke:#39ff14;stroke-width:2.2px;"
             ),
             ggiraph::opts_sizing(rescale = FALSE),
-            ggiraph::opts_hover(css = "stroke:#000;stroke-width:1px;")
+            ggiraph::opts_hover(css = "stroke:#000;stroke-width:1px;"),
+            ggiraph_toolbar_pngname(ora_heatmap_download_basename())
           )
         )
       })
