@@ -53,13 +53,14 @@ cp deploy/apps/all.example.yaml deploy/apps/all.yaml
 # edit deploy/apps/all.yaml — set account, title, and app_id from the Connect UI (after first publish)
 ```
 
-Each file combines **runtime** keys (same idea as root `config.yaml`: `title`, `studies`, `pathways_list`, …), optional `extends: config.yaml`, a **`deploy:`** block (`account`, `title`, and `app_id` for `rsconnect deploy`; `app_id` is optional when using **`--new`** below), and a **`bundle:`** block (omit `databases/`, `orig/`, swap redundant count TSV for sibling `.rds`/`.eds` when present, ORA validation mode).
+Each file combines **runtime** keys (same idea as root `config.yaml`: `title`, `studies`, `pathways_list`, `auth`, …), optional `extends: config.yaml`, a **`deploy:`** block (`account`, `title`, and `app_id` for `rsconnect deploy`; `app_id` is optional when using **`--new`** below), and a **`bundle:`** block (omit `databases/`, `orig/`, swap redundant count TSV for sibling `.rds`/`.eds` when present, ORA validation mode).
 
 - **Build manifest and deploy:** `./deploy/deploy.sh heart` or `./deploy/deploy.sh deploy/apps/heart.yaml`. Add `--dry-run` to print bundle paths and approximate size without writing `manifest.json`. Add **`--verbose`** or **`-v`** for per-study bundle messages and `rsconnect::writeManifest(verbose = TRUE)` (dependency capture is clearer but still slow). Add **`--debug`** for a full bundle path list and `set -x` during the upload step. For a **first-time** publish to Connect (no content GUID yet), run with **`--new`** (for example `./deploy/deploy.sh newstudy --new --debug`); rsconnect creates new content and prints its URL—copy the **`app_id`** into the YAML for later updates without `--new`.
 - **“All studies” wrapper:** [`rsconnect.sh`](rsconnect.sh) runs `./deploy/deploy.sh all` (expects a local **`deploy/apps/all.yaml`**, typically created from [`deploy/apps/all.example.yaml`](deploy/apps/all.example.yaml)).
 - **Runtime config on the server:** set environment variable **`EXPRS_MAIN_CONFIG`** to the path of the same YAML file **inside the deployed bundle** (for example `deploy/apps/heart.yaml`). The app falls back to `config.yaml` when unset.
 - **Thin bundles (`bundle.omit_databases: true`):** do not upload `databases/pathways/`. Use an **inline `pathways_list`** in the deploy YAML (or a repo-relative list file such as `databases/pathways_list.yaml`, which is still bundled) and **precompute** per-study ORA (`ora_file`, default `ora/enrichment.rds`) for every pathway in that list. The manifest step validates RDS coverage (`bundle.ora_validate`: `strict`, `warn`, or `skip`). **Custom ontology** (.xlsx) still runs live `enricher` and does not require pathway files on disk. If the deploy YAML uses **`extends:`**, the base file (e.g. `config.yaml`) is included in the bundle so the app can merge the same keys at runtime.
 - **Secrets:** store Connect API keys outside the repo (environment variables or `rsconnect` account configuration). If an API key was ever committed, rotate it on the server.
+- **Login users:** put per-app shinymanager users in an **`auth:`** list in each deploy YAML (hashed passwords from `Rscript scripts/hash_password.R`). The app reads `auth` from the merged main config (`EXPRS_MAIN_CONFIG` on Connect). Local runs without `auth` in config can still use `data/creds.txt` (lines whose `user` starts with `#` are ignored).
 
 You need the **rsconnect** R package for `deploy/write_manifest.R`. The first run may take several minutes while dependencies are captured. From the repo root, `EXPRS_DEPLOY_REPO` defaults to the current working directory.
 
@@ -224,7 +225,15 @@ write_gene_deg_long(df, "your_study_id")
 
 ### Password hashing utility
 
-`scripts/hash_password.R` can use the **scrypt** package if present; it falls back otherwise. Only relevant if you manage `shinymanager` credentials with that script.
+`scripts/hash_password.R` prints a scrypt hash for the `password` field under **`auth:`** in `config.yaml` or `deploy/apps/*.yaml`. Example:
+
+```yaml
+auth:
+  - user: myapp
+    password: "<paste hash here>"
+```
+
+Only relevant if you manage shinymanager credentials with that script. For local dev without `auth` in YAML, `data/creds.txt` remains a fallback (prefix `user` with `#` to disable a row).
 
 ### Custom modules
 

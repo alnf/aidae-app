@@ -1,5 +1,5 @@
 #!/usr/bin/env Rscript
-# Generate a scrypt password hash for shinymanager (creds.txt).
+# Generate a scrypt password hash for shinymanager (`auth:` in config / deploy YAML).
 # Usage: Rscript scripts/hash_password.R [password]
 # Default password: "test"
 

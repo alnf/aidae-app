@@ -23,6 +23,7 @@ source("scripts/upset_tab.R")
 source("scripts/panel_heatmap_utils.R")
 source("scripts/panel_tab.R")
 source("scripts/config_tab.R")
+source("scripts/auth_config.R")
 
 `%||%` <- function(x, y) if (is.null(x)) y else x
 
@@ -165,16 +166,7 @@ library(shiny)
 library(bs4Dash)
 library(shinymanager)
 
-creds <- read.table("data/creds.txt", sep="\t", header = T)
-credentials <- data.frame(
-  user     = c(creds$user),
-  password = c(creds$password),
-  start    = c("2025-09-11"),
-  expire   = c(NA),
-  admin    = c(FALSE),
-  stringsAsFactors = FALSE,
-  is_hashed_password = TRUE
-)
+credentials <- credentials_from_main_config(main_config)
 
 
 body <- dashboardBody(

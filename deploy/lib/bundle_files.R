@@ -485,10 +485,6 @@ collect_bundle_files <- function(repo_root, parsed) {
   }
 
   files <- c("app.R", "LICENSE", "scripts/")
-  creds <- file.path(repo_root, "data", "creds.txt")
-  if (file.exists(creds)) {
-    files <- c(files, "data/creds.txt")
-  }
   files <- c(files, parsed$app_yaml_relpath)
   extf <- parsed$extends_relpath
   if (length(extf) == 1L && !is.na(extf) && nzchar(extf)) {

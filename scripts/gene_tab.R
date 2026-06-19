@@ -352,25 +352,44 @@ geneTabServer <- function(id, study_ids, study_labels, external_symbol = NULL, d
       }
     }
 
-    shiny::observe({
+    # Rebuild selectize choices when visible studies/DEG lists change — not on every gene pick.
+    # Reading input$symbol inside a generic observe() re-ran updateSelectizeInput on each selection
+    # and briefly cleared the value, so plots flashed then disappeared.
+    gene_choice_signature <- shiny::reactive({
+      sc <- app_scope()
+      list(study_ids = sc$study_ids, deg_by_study = sc$deg_by_study)
+    })
+
+    preserve_gene_selection <- function(cur, syms) {
+      if (is.null(cur)) return(character(0))
+      sym <- trimws(as.character(cur))
+      if (!nzchar(sym)) return(character(0))
+      if (sym %in% syms) return(sym)
+      hit <- which(tolower(as.character(syms)) == tolower(sym))
+      if (length(hit) > 0L) as.character(syms[[hit[[1L]]]]) else character(0)
+    }
+
+    shiny::observeEvent(gene_choice_signature(), {
       sc <- app_scope()
       syms <- collect_all_gene_symbols(sc$study_ids, sc$deg_by_study)
       gene_choices(syms)
-      cur <- input$symbol
-      sel <- if (!is.null(cur) && nzchar(trimws(cur)) && trimws(cur) %in% syms) trimws(cur) else character(0)
+      sel <- preserve_gene_selection(shiny::isolate(input$symbol), syms)
       shiny::updateSelectizeInput(
         session, "symbol",
         choices = syms,
         selected = sel,
         server = TRUE
       )
+    }, ignoreNULL = FALSE)
+
+    shiny::observe({
+      sc <- app_scope()
       new_sids <- setdiff(sc$study_ids, registered_studies())
-      if (length(new_sids) > 0L) {
-        for (sid in new_sids) {
-          register_study_plots(sid)
-        }
-        registered_studies(unique(c(registered_studies(), new_sids)))
+      if (length(new_sids) < 1L) return()
+      for (sid in new_sids) {
+        register_study_plots(sid)
       }
+      registered_studies(unique(c(registered_studies(), new_sids)))
     })
 
     output$study_sections <- shiny::renderUI({
