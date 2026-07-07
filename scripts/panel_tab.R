@@ -3,20 +3,6 @@
 
 `%||%` <- function(x, y) if (is.null(x)) y else x
 
-# Non-linear height scaling for panel expression heatmaps (rows = genes + category blocks).
-# Tuned like ORA row heatmaps: compact for small sets, sublinear growth for large ones.
-.panel_heatmap_height_px <- function(n_genes, n_categories) {
-  ng <- suppressWarnings(as.integer(n_genes))
-  nc <- suppressWarnings(as.integer(n_categories))
-  if (is.na(ng) || ng < 1L) ng <- 1L
-  if (is.na(nc) || nc < 1L) nc <- 1L
-  ngf <- as.numeric(ng)
-  ncf <- as.numeric(nc)
-  h <- 195 + 40 * (ngf^0.82) + 11 * sqrt(ngf) + 8 * log1p(ngf) +
-    12 * (ncf^0.65)
-  as.integer(min(6800L, max(420L, round(h))))
-}
-
 # Plot width (px): from built heatmap object when available.
 .panel_heatmap_width_px <- function(ht, n_categories = 1L, show_row_names = TRUE) {
   panel_heatmap_plot_width_px(ht, show_row_names, n_categories)
@@ -28,13 +14,13 @@
     panels,
     function(p) {
       if (!is.null(p$error) || is.null(p$ht)) return(0L)
-      .panel_heatmap_height_px(p$found, p$n_categories %||% 1L)
+      panel_heatmap_plot_height_px(p$ht)
     },
     integer(1L)
   )
   hs <- hs[hs > 0L]
   if (length(hs) < 1L) return(420L)
-  as.integer(min(6800L, max(420L, sum(hs))))
+  as.integer(min(6800L, max(280L, sum(hs))))
 }
 
 .panel_plot_width_px <- function(panels) {

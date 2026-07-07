@@ -112,7 +112,9 @@ ora_heatmap_comparison_basename <- function(pathway_file, custom_ontology, oi, s
   )
 }
 
-upset_plot_basename <- function(kind, max_degree, min_intersection, fdr, log2fc, base_mean = NULL, svalue = NULL) {
+upset_plot_basename <- function(
+    kind, max_degree, min_intersection, fdr, log2fc,
+    base_mean = NULL, svalue = NULL, direction_filter = "any") {
   slug <- paste(
     c(
       paste0("deg", format_param_num(max_degree)),
@@ -126,6 +128,11 @@ upset_plot_basename <- function(kind, max_degree, min_intersection, fdr, log2fc,
   if (length(bm) > 0L && !is.na(bm) && bm > 0) slug <- paste(slug, paste0("bm", format_param_num(bm)), sep = "-")
   sv <- suppressWarnings(as.numeric(svalue))
   if (length(sv) > 0L && !is.na(sv) && sv > 0) slug <- paste(slug, paste0("sv", format_param_num(sv)), sep = "-")
+  df <- tolower(trimws(as.character(direction_filter %||% "any")))
+  if (identical(df, "concordant")) slug <- paste(slug, "dir-concordant", sep = "-")
+  if (identical(df, "discordant")) slug <- paste(slug, "dir-discordant", sep = "-")
+  if (identical(df, "up")) slug <- paste(slug, "dir-up", sep = "-")
+  if (identical(df, "down")) slug <- paste(slug, "dir-down", sep = "-")
   build_plot_filename("upset", slug, kind)
 }
 
@@ -135,4 +142,10 @@ ggiraph_toolbar_pngname <- function(pngname) {
   if (!nzchar(nm)) nm <- "plot"
   if (nchar(nm) > 180L) nm <- substr(nm, 1L, 180L)
   ggiraph::opts_toolbar(pngname = nm)
+}
+
+# Hide ggiraph's client-side PNG export (fails on large patchwork / wide SVG plots).
+ggiraph_toolbar_interactive <- function() {
+  if (!requireNamespace("ggiraph", quietly = TRUE)) return(NULL)
+  ggiraph::opts_toolbar(hidden = "saveaspng")
 }

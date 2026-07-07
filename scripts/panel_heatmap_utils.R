@@ -3,13 +3,25 @@
 
 `%||%` <- function(x, y) if (is.null(x)) y else x
 
+# Row label font size (ComplexHeatmap default is 10).
+.panel_row_label_fontsize <- function() 7.5
+
+# mm per gene row: compact; gentle taper as row count grows.
+.panel_mm_per_row <- function(n_rows) {
+  nr <- suppressWarnings(as.integer(n_rows))
+  if (is.na(nr) || nr < 1L) nr <- 1L
+  nf <- as.numeric(nr)
+  mm <- 2.5 + 1.2 * (nf^(-0.2))
+  max(2.3, min(3.5, mm))
+}
+
 # mm per sample column: wider for small panels, tapers as sample count grows.
 .panel_mm_per_column <- function(n_samples) {
   ns <- suppressWarnings(as.integer(n_samples))
   if (is.na(ns) || ns < 1L) ns <- 1L
   nf <- as.numeric(ns)
-  mm <- 2.15 + 3.9 * (nf^(-0.31))
-  max(2.4, min(5.5, mm))
+  mm <- 3.4 + 6.8 * (nf^(-0.27))
+  max(3.8, min(9.5, mm))
 }
 
 # Layout for sample columns (no column names shown).
@@ -21,11 +33,32 @@
     body_width = grid::unit(ns * mm_per_col, "mm"),
     column_gap = grid::unit(0.35, "mm"),
     column_dend_height = if (isTRUE(cluster_columns)) {
-      grid::unit(7, "mm")
+      grid::unit(6, "mm")
     } else {
       grid::unit(0, "mm")
     },
     mm_per_col = mm_per_col
+  )
+}
+
+# Layout for gene rows (no row names width included).
+.panel_row_layout <- function(n_rows, n_categories = 1L, cluster_rows = TRUE) {
+  nr <- suppressWarnings(as.integer(n_rows))
+  if (is.na(nr) || nr < 1L) nr <- 1L
+  nc <- suppressWarnings(as.integer(n_categories))
+  if (is.na(nc) || nc < 1L) nc <- 1L
+  mm_per_row <- .panel_mm_per_row(nr)
+  # Small extra gap between category row-split blocks.
+  split_gap_mm <- max(0, nc - 1L) * 1.1
+  list(
+    body_height = grid::unit(nr * mm_per_row + split_gap_mm, "mm"),
+    row_gap = grid::unit(0.12, "mm"),
+    row_dend_width = if (isTRUE(cluster_rows)) {
+      grid::unit(8, "mm")
+    } else {
+      grid::unit(0, "mm")
+    },
+    mm_per_row = mm_per_row
   )
 }
 
@@ -49,6 +82,20 @@ panel_heatmap_plot_width_px <- function(
   layout_px <- layout_mm * px_per_mm
   w <- ceiling(layout_px * 1.04)
   as.integer(min(12000L, max(480L, w)))
+}
+
+#' Plot height (px) for Shiny `plotOutput`, from a built heatmap object.
+panel_heatmap_plot_height_px <- function(ht, res = 96L) {
+  if (is.null(ht)) return(420L)
+  px_per_mm <- res / 25.4
+  layout_mm <- as.numeric(grid::convertHeight(
+    ComplexHeatmap::ht_size(ht)$height,
+    "mm",
+    valueOnly = TRUE
+  ))
+  layout_px <- layout_mm * px_per_mm
+  h <- ceiling(layout_px * 1.04)
+  as.integer(min(6800L, max(280L, h)))
 }
 
 panel_category_colors <- function(terms) {
@@ -363,21 +410,25 @@ panel_heatmap_build <- function(plot_data) {
   has_ragg <- requireNamespace("ragg", quietly = TRUE)
   raster_device <- if (has_ragg) "agg_png" else "png"
   col_layout <- .panel_column_layout(ncol(m_z), isTRUE(plot_data$cluster_columns))
+  row_layout <- .panel_row_layout(
+    nrow(m_z),
+    length(term_present),
+    isTRUE(plot_data$cluster_rows)
+  )
 
   ComplexHeatmap::Heatmap(
     m_z,
     name = "z-score",
     col = col_fun,
     width = col_layout$body_width,
+    height = row_layout$body_height,
     column_gap = col_layout$column_gap,
+    row_gap = row_layout$row_gap,
     column_dend_height = col_layout$column_dend_height,
-    row_dend_width = if (isTRUE(plot_data$cluster_rows)) {
-      grid::unit(10, "mm")
-    } else {
-      grid::unit(0, "mm")
-    },
+    row_dend_width = row_layout$row_dend_width,
     show_row_names = isTRUE(plot_data$show_row_names),
     row_names_side = "right",
+    row_names_gp = grid::gpar(fontsize = .panel_row_label_fontsize()),
     row_labels = as.character(row_df$gene),
     show_column_names = FALSE,
     top_annotation = top_anno,

@@ -55,6 +55,173 @@
   base
 }
 
+.upset_normalize_direction_mode <- function(mode) {
+  m <- tolower(trimws(as.character(mode %||% "any")))
+  if (m %in% c("any", "concordant", "discordant", "up", "down")) m else "any"
+}
+
+#' Named symbol -> log2FC for threshold-passing rows; duplicate symbols keep max abs(log2FC).
+.upset_build_fc_map <- function(res, idx) {
+  if (is.null(idx) || length(idx) < 1L || is.null(res) || nrow(res) < 1L) {
+    return(numeric(0))
+  }
+  sy <- toupper(trimws(as.character(res$symbol[idx])))
+  fc <- suppressWarnings(as.numeric(res$log2FoldChange[idx]))
+  ok <- !is.na(sy) & nzchar(sy) & !is.na(fc)
+  sy <- sy[ok]
+  fc <- fc[ok]
+  if (length(sy) < 1L) return(numeric(0))
+  ord <- order(-abs(fc))
+  sy <- sy[ord]
+  fc <- fc[ord]
+  keep <- !duplicated(sy)
+  stats::setNames(fc[keep], sy[keep])
+}
+
+.upset_fc_by_set_for_display <- function(fc_by_set, set_cols, set_display) {
+  if (length(fc_by_set) < 1L || length(set_cols) < 1L) return(list())
+  dsp <- make.unique(as.character(set_display))
+  out <- vector("list", length(set_cols))
+  names(out) <- dsp
+  for (i in seq_along(set_cols)) {
+    out[[dsp[[i]]]] <- fc_by_set[[set_cols[[i]]]] %||% numeric(0)
+  }
+  out
+}
+
+.upset_gene_passes_direction <- function(gene, set_cols_display, fc_by_set_display, mode) {
+  mode <- .upset_normalize_direction_mode(mode)
+  if (identical(mode, "any")) return(TRUE)
+  gene <- toupper(trimws(as.character(gene)))
+  if (!nzchar(gene)) return(FALSE)
+  fcs <- vapply(
+    set_cols_display,
+    function(col) {
+      mp <- fc_by_set_display[[col]]
+      if (is.null(mp) || length(mp) < 1L) return(NA_real_)
+      v <- mp[[gene]]
+      if (is.null(v) || length(v) < 1L) return(NA_real_)
+      suppressWarnings(as.numeric(v[[1L]]))
+    },
+    numeric(1L)
+  )
+  if (any(is.na(fcs))) return(FALSE)
+  if (identical(mode, "up")) return(all(fcs > 0))
+  if (identical(mode, "down")) return(all(fcs < 0))
+  if (identical(mode, "concordant")) {
+    if (any(fcs == 0)) return(FALSE)
+    return(length(unique(sign(fcs))) == 1L)
+  }
+  if (identical(mode, "discordant")) {
+    if (length(set_cols_display) < 2L) return(FALSE)
+    if (any(fcs == 0)) return(FALSE)
+    return(length(unique(sign(fcs))) > 1L)
+  }
+  FALSE
+}
+
+.upset_apply_direction_to_matrix <- function(wide, set_cols, fc_by_set, mode) {
+  mode <- .upset_normalize_direction_mode(mode)
+  if (mode %in% c("any", "concordant", "discordant") || is.null(wide) || length(set_cols) < 1L) {
+    return(wide)
+  }
+  out <- wide
+  for (i in seq_along(set_cols)) {
+    sc <- set_cols[[i]]
+    mp <- fc_by_set[[sc]] %||% numeric(0)
+    if (length(mp) < 1L) {
+      out[[sc]] <- FALSE
+      next
+    }
+    if (identical(mode, "up")) {
+      genes <- names(mp)[mp > 0]
+    } else {
+      genes <- names(mp)[mp < 0]
+    }
+    out[[sc]] <- out$symbol %in% genes
+  }
+  out
+}
+
+#' Rebuild boolean membership: gene TRUE in set S iff it appears in some filtered intersection containing S.
+.upset_rebuild_mat_from_genes_by_int <- function(genes_by_int, ud, colnames_mat) {
+  cols <- as.character(colnames_mat)
+  cols <- cols[!is.na(cols) & nzchar(cols)]
+  if (length(cols) < 1L || length(genes_by_int) < 1L) {
+    return(NULL)
+  }
+  all_genes <- unique(unlist(genes_by_int, use.names = FALSE))
+  all_genes <- all_genes[!is.na(all_genes) & nzchar(all_genes)]
+  if (length(all_genes) < 1L) return(NULL)
+  mat <- as.data.frame(
+    matrix(FALSE, nrow = length(all_genes), ncol = length(cols)),
+    stringsAsFactors = FALSE
+  )
+  rownames(mat) <- all_genes
+  colnames(mat) <- cols
+  ns_lab <- ud$non_sanitized_labels
+  for (int in names(genes_by_int)) {
+    genes <- genes_by_int[[int]]
+    genes <- unique(as.character(genes))
+    genes <- genes[!is.na(genes) & nzchar(genes)]
+    if (length(genes) < 1L) next
+    toks <- strsplit(as.character(int), "-", fixed = TRUE)[[1L]]
+    sets_disp <- unname(ns_lab[toks])
+    sets_disp <- sets_disp[!is.na(sets_disp) & nzchar(sets_disp)]
+    for (cn in sets_disp) {
+      if (cn %in% cols) {
+        mat[genes, cn] <- TRUE
+      }
+    }
+  }
+  mat
+}
+
+#' Pad a direction-filtered matrix so per-set totals match presence membership.
+#' Pseudo-rows are TRUE in one set only; with min_degree >= 2 they do not enter
+#' multi-set intersections.
+.upset_pad_mat_presence_set_sizes <- function(mat_intersect, mat_presence) {
+  if (is.null(mat_intersect) || is.null(mat_presence)) return(mat_intersect)
+  cols <- colnames(mat_intersect)
+  if (length(cols) < 1L || !identical(cols, colnames(mat_presence))) {
+    return(mat_intersect)
+  }
+  pad_parts <- list()
+  for (cn in cols) {
+    tgt <- sum(as.logical(mat_presence[[cn]]), na.rm = TRUE)
+    cur <- sum(as.logical(mat_intersect[[cn]]), na.rm = TRUE)
+    need <- as.integer(tgt - cur)
+    if (!is.finite(need) || need < 1L) next
+    fake <- as.data.frame(
+      matrix(FALSE, nrow = need, ncol = length(cols)),
+      stringsAsFactors = FALSE
+    )
+    colnames(fake) <- cols
+    fake[[cn]] <- TRUE
+    rownames(fake) <- paste0(".upsetPad_", match(cn, cols), "_", seq_len(need))
+    pad_parts[[cn]] <- fake
+  }
+  if (length(pad_parts) < 1L) return(mat_intersect)
+  pad <- do.call(rbind, pad_parts)
+  out <- mat_intersect
+  if (is.null(rownames(out)) || length(rownames(out)) != nrow(out)) {
+    rownames(out) <- paste0(".upsetG_", seq_len(nrow(out)))
+  }
+  rbind(out, pad)
+}
+
+.upset_direction_status_label <- function(mode) {
+  mode <- .upset_normalize_direction_mode(mode)
+  switch(
+    mode,
+    concordant = "Direction: concordant (same sign in all lists per intersection). ",
+    discordant = "Direction: opposite sign across lists (present in all lists per intersection). ",
+    up = "Direction: up-regulated in all lists (log2FC > 0). ",
+    down = "Direction: down-regulated in all lists (log2FC < 0). ",
+    ""
+  )
+}
+
 .upset_build_wide_matrix <- function(tasks, thr_overrides) {
   if (length(tasks) < 1L) {
     return(list(
@@ -66,11 +233,13 @@
       set_study = character(0),
       set_assay = character(0),
       set_sid = character(0),
-      set_deg_file = character(0)
+      set_deg_file = character(0),
+      fc_by_set = list()
     ))
   }
 
   gene_sets <- vector("list", length(tasks))
+  fc_by_set <- vector("list", length(tasks))
   set_cols <- character(length(tasks))
   set_display <- character(length(tasks))
   set_study <- character(length(tasks))
@@ -95,6 +264,7 @@
 
     if (is.null(deg_rel) || !nzchar(as.character(deg_rel))) {
       gene_sets[[i]] <- character(0)
+      fc_by_set[[i]] <- numeric(0)
       next
     }
 
@@ -109,6 +279,7 @@
     mm <- loaded$mm
     if (is.null(res) || is.null(mm) || nrow(res) < 1L) {
       gene_sets[[i]] <- character(0)
+      fc_by_set[[i]] <- numeric(0)
       next
     }
     idx <- filter_heatmap_row_index(
@@ -117,9 +288,11 @@
     )
     if (is.null(idx) || length(idx) < 1L) {
       gene_sets[[i]] <- character(0)
+      fc_by_set[[i]] <- numeric(0)
     } else {
       sy <- toupper(trimws(as.character(res$symbol[idx])))
       gene_sets[[i]] <- unique(sy[!is.na(sy) & nzchar(sy)])
+      fc_by_set[[i]] <- .upset_build_fc_map(res, idx)
     }
   }
 
@@ -135,7 +308,8 @@
       set_study = set_study,
       set_assay = set_assay,
       set_sid = set_sid,
-      set_deg_file = set_deg_file
+      set_deg_file = set_deg_file,
+      fc_by_set = stats::setNames(fc_by_set, set_cols)
     ))
   }
 
@@ -153,7 +327,8 @@
     set_study = set_study,
     set_assay = set_assay,
     set_sid = set_sid,
-    set_deg_file = set_deg_file
+    set_deg_file = set_deg_file,
+    fc_by_set = stats::setNames(fc_by_set, set_cols)
   )
 }
 
@@ -251,11 +426,13 @@
 }
 
 #' Genes in each ComplexUpset intersection (`mode = intersect` / inclusive_intersection).
-.upset_cu_genes_by_intersection <- function(ud, wide_symbol) {
+.upset_cu_genes_by_intersection <- function(
+    ud, wide_symbol, direction_mode = "any", fc_by_set_display = NULL) {
   ints <- as.character(ud$plot_intersections_subset)
   if (length(ints) < 1L) {
     return(stats::setNames(list(), character(0)))
   }
+  direction_mode <- .upset_normalize_direction_mode(direction_mode)
   ns_lab <- ud$non_sanitized_labels
   out <- stats::setNames(vector("list", length(ints)), ints)
   cn <- setdiff(colnames(wide_symbol), "symbol")
@@ -276,6 +453,14 @@
     ok <- apply(sub, 1L, function(r) all(as.logical(r)))
     sy <- as.character(wide_symbol$symbol[ok])
     sy <- unique(sy[!is.na(sy) & nzchar(sy)])
+    if (!identical(direction_mode, "any") && length(sy) > 0L && !is.null(fc_by_set_display)) {
+      keep <- vapply(
+        sy,
+        function(g) .upset_gene_passes_direction(g, orig, fc_by_set_display, direction_mode),
+        logical(1L)
+      )
+      sy <- sy[keep]
+    }
     out[[int]] <- sy
   }
   out
@@ -569,6 +754,44 @@
   "all"
 }
 
+.upset_cu_call_upset_data <- function(mat, max_deg, min_sz, int_sets) {
+  tryCatch(
+    ComplexUpset::upset_data(
+      mat,
+      intersect = colnames(mat),
+      mode = "intersect",
+      min_size = min_sz,
+      min_degree = 2L,
+      max_degree = max_deg,
+      intersections = int_sets,
+      sort_sets = FALSE,
+      sort_intersections = "descending",
+      sort_intersections_by = "cardinality",
+      encode_sets = TRUE,
+      group_by = "degree"
+    ),
+    error = function(e) list(error = conditionMessage(e))
+  )
+}
+
+.upset_wide_from_display_mat <- function(mat, set_cols, set_display) {
+  dsp <- make.unique(as.character(set_display))
+  sy <- rownames(mat)
+  if (is.null(sy) || length(sy) < 1L) {
+    return(data.frame(symbol = character(0), stringsAsFactors = FALSE))
+  }
+  wide <- data.frame(symbol = sy, stringsAsFactors = FALSE)
+  for (i in seq_along(set_cols)) {
+    cn <- dsp[[i]]
+    if (cn %in% colnames(mat)) {
+      wide[[set_cols[[i]]]] <- as.logical(mat[sy, cn, drop = TRUE])
+    } else {
+      wide[[set_cols[[i]]]] <- FALSE
+    }
+  }
+  wide
+}
+
 # ComplexUpset::upset() ends with plot_layout(heights = c(rep(1, n_ann), height_ratio)): every
 # annotation row (intersection-size bar first) has weight 1. To shorten only the bar row without
 # stretching the dot matrix, use weight < 1 on that row and scale SVG height so the matrix row
@@ -689,6 +912,116 @@
   )
 }
 
+#' Build ComplexUpset patchwork for display or SVG export.
+#' @return list(ok, msg, plot, width_svg, height_svg)
+.upset_cu_build_ggplot <- function(pl, interactive = TRUE) {
+  fail <- function(msg) list(ok = FALSE, msg = msg, plot = NULL, width_svg = NA_real_, height_svg = NA_real_)
+  if (!requireNamespace("ggplot2", quietly = TRUE)) {
+    return(fail("Package ggplot2 is required for the UpSet plot."))
+  }
+  if (!requireNamespace("ComplexUpset", quietly = TRUE)) {
+    return(fail("Package ComplexUpset is required for the UpSet plot."))
+  }
+  if (!isTRUE(pl$ok)) {
+    return(fail(pl$msg %||% "No data."))
+  }
+  mat <- pl$cu$mat
+  if (is.null(mat) || ncol(mat) < 2L) {
+    return(fail("Need at least two non-empty DEG lists to draw an UpSet."))
+  }
+  mat_presence <- pl$cu$mat_presence
+  if (!is.null(mat_presence) && !identical(.upset_normalize_direction_mode(pl$direction_filter), "any")) {
+    mat <- .upset_pad_mat_presence_set_sizes(mat, mat_presence)
+  }
+  tips <- pl$cu$tooltip_by_int
+  if (is.null(tips) || length(tips) < 1L) tips <- character(0)
+  siddeg_sep <- .upset_siddeg_data_id_sep
+  sid_map <- pl$cu$sid_by_enc %||% character(0)
+  deg_map <- pl$cu$deg_by_enc %||% character(0)
+  enc_keys <- as.character(names(sid_map))
+  siddeg_by_enc <- stats::setNames(
+    vapply(enc_keys, function(enc) {
+      s <- as.character(sid_map[[enc]])
+      d <- as.character(deg_map[[enc]])
+      if (is.na(s)) s <- ""
+      if (is.na(d)) d <- ""
+      paste(s, d, sep = siddeg_sep)
+    }, character(1L)),
+    enc_keys
+  )
+  if (isTRUE(interactive) && requireNamespace("ggiraph", quietly = TRUE)) {
+    mx_geom <- ggiraph::geom_point_interactive(
+      ggplot2::aes(
+        data_id = paste0(
+          as.character(.data$intersection),
+          "\x01",
+          unname(siddeg_by_enc[as.character(.data$group)]),
+          "\x01",
+          ifelse(as.logical(.data$value), "1", "0")
+        ),
+        tooltip = ifelse(
+          as.logical(.data$value),
+          ifelse(
+            is.na(tips[as.character(.data$intersection)]),
+            paste0(
+              .upset_cu_tooltip_escape(as.character(.data$intersection)),
+              "\nGenes in intersection: ?"
+            ),
+            tips[as.character(.data$intersection)]
+          ),
+          NA_character_
+        )
+      ),
+      size = 3
+    )
+  } else {
+    mx_geom <- ggplot2::geom_point(
+      ggplot2::aes(
+        colour = ifelse(as.logical(.data$value), "#000000", "#d0d0d0"),
+        size = ifelse(as.logical(.data$value), 3, 2.2)
+      )
+    )
+  }
+  mx <- ComplexUpset::intersection_matrix(geom = mx_geom)
+  mx <- mx + ggplot2::scale_x_discrete(expand = ggplot2::expansion(mult = 0.012, add = 0.02))
+  int_sets <- pl$cu$intersections_setting %||% "observed"
+  base_ann <- list(
+    `Intersection size` = ComplexUpset::intersection_size(
+      counts = FALSE,
+      mode = "inclusive_intersection"
+    )
+  )
+  p <- ComplexUpset::upset(
+    mat,
+    intersect = colnames(mat),
+    name = "Intersection",
+    mode = "intersect",
+    min_size = pl$min_intersection %||% 1,
+    min_degree = 2,
+    max_degree = pl$max_degree,
+    intersections = int_sets,
+    sort_sets = FALSE,
+    sort_intersections = "descending",
+    sort_intersections_by = "cardinality",
+    encode_sets = TRUE,
+    base_annotations = base_ann,
+    matrix = mx,
+    stripes = .upset_cu_stripes(mat, pl$study_ord, pl$cu$study_color_map),
+    height_ratio = 1,
+    width_ratio = 0.18,
+    themes = .upset_cu_upset_themes()
+  )
+  lay <- .upset_cu_shrink_bar_layout(
+    p,
+    height_ratio = 1,
+    bar_row_weight = .upset_cu_intersection_bar_row_weight,
+    base_height_svg = 7.6,
+    n_annotation_rows = 1L
+  )
+  wsvg <- .upset_cu_plot_width_svg(mat, pl$cu$n_intersections, pl$cu$intersection_degrees)
+  list(ok = TRUE, msg = NULL, plot = lay$plot, width_svg = wsvg, height_svg = lay$height_svg)
+}
+
 upsetTabUI <- function(id) {
   ns <- shiny::NS(id)
   shiny::tagList(
@@ -717,6 +1050,7 @@ upsetTabUI <- function(id) {
         shiny::tags$div(
           class = "upset-plot-wrap",
           style = "overflow-x: auto; width: 100%; max-width: 100%; min-width: 0;",
+          shiny::uiOutput(ns("upset_plot_dl_ui")),
           shiny::tags$div(
             style = "display: inline-block; vertical-align: top; max-width: none;",
             ggiraph::girafeOutput(ns("upset_plot"), height = paste0(.upset_cu_girafe_plot_height_px(), "px"))
@@ -747,7 +1081,7 @@ upsetTabUI <- function(id) {
   )
 }
 
-#' @param cfg Reactive: `list(max_degree = int, min_intersection = num, refresh = int, row_sort = chr)` invalidates rebuilds.
+#' @param cfg Reactive: `list(max_degree, min_intersection, refresh, row_sort, direction_filter)` invalidates rebuilds. `direction_filter` is `"any"`, `"concordant"`, `"discordant"`, `"up"`, or `"down"`.
 #' @param thr_overrides_parent `reactiveValues()` from parent; updated on Refresh before `cfg()$refresh` increments.
 #' @param on_dot_click Optional `function(study_id, deg_file, genes_chr)` when user clicks
 #'   an active dot in the intersection matrix (opens DEGs tab with that list + intersection genes).
@@ -770,7 +1104,8 @@ upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_paren
       thr <- if (is.function(thr_sidebar)) thr_sidebar() else default_heatmap_thresholds()
       upset_plot_basename(
         kind, c$max_degree, c$min_intersection,
-        thr$fdr, thr$log2fc, thr$base_mean, thr$svalue
+        thr$fdr, thr$log2fc, thr$base_mean, thr$svalue,
+        direction_filter = c$direction_filter %||% "any"
       )
     }
 
@@ -780,12 +1115,16 @@ upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_paren
       cfg()$min_intersection
       cfg()$refresh
       cfg()$row_sort
+      cfg()$direction_filter
+      direction_filter <- .upset_normalize_direction_mode(cfg()$direction_filter)
       ov <- shiny::reactiveValuesToList(thr_overrides)
       tasks <- ora_build_deg_tasks(sc$study_ids, sc$study_labels, deg_filter = NULL, deg_by_study = sc$deg_by_study)
       pl <- .upset_build_wide_matrix(tasks, ov)
       if (!isTRUE(pl$ok)) {
         return(pl)
       }
+      pl$direction_filter <- direction_filter
+      pl$wide_presence <- pl$wide
       max_deg <- suppressWarnings(as.integer(cfg()$max_degree))
       if (length(max_deg) != 1L || is.na(max_deg) || max_deg < 2L) {
         max_deg <- length(pl$set_cols)
@@ -804,13 +1143,28 @@ upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_paren
         return(pl)
       }
       dsp <- make.unique(as.character(pl$set_display))
-      mat0 <- pl$wide[, pl$set_cols, drop = FALSE]
+      fc_by_set_dsp <- .upset_fc_by_set_for_display(pl$fc_by_set, pl$set_cols, dsp)
+      mat0_presence <- pl$wide_presence[, pl$set_cols, drop = FALSE]
+      colnames(mat0_presence) <- dsp
+      wide_for_mat <- if (direction_filter %in% c("up", "down")) {
+        .upset_apply_direction_to_matrix(
+          pl$wide_presence, pl$set_cols, pl$fc_by_set, direction_filter
+        )
+      } else {
+        pl$wide_presence
+      }
+      mat0 <- wide_for_mat[, pl$set_cols, drop = FALSE]
       colnames(mat0) <- dsp
       sn_order <- ch$set_names_plot_order
+      mat_presence <- mat0_presence[, sn_order, drop = FALSE]
       mat <- mat0[, sn_order, drop = FALSE]
       if (ncol(mat) < 2L) {
         pl$ok <- FALSE
-        pl$msg <- "Need at least two non-empty DEG lists to draw an UpSet."
+        pl$msg <- if (direction_filter %in% c("up", "down")) {
+          paste0("Need at least two non-empty DEG lists after ", direction_filter, "-regulation filter.")
+        } else {
+          "Need at least two non-empty DEG lists to draw an UpSet."
+        }
         return(pl)
       }
       if (!requireNamespace("ComplexUpset", quietly = TRUE)) {
@@ -819,35 +1173,68 @@ upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_paren
         return(pl)
       }
       int_sets <- .upset_cu_intersections_setting(max_deg, ncol(mat))
-      ud <- tryCatch(
-        ComplexUpset::upset_data(
-          mat,
-          intersect = colnames(mat),
-          mode = "intersect",
-          min_size = min_sz,
-          min_degree = 2L,
-          max_degree = max_deg,
-          intersections = int_sets,
-          sort_sets = FALSE,
-          sort_intersections = "descending",
-          sort_intersections_by = "cardinality",
-          encode_sets = TRUE,
-          group_by = "degree"
-        ),
-        error = function(e) list(error = conditionMessage(e))
-      )
-      if (!is.null(ud$error)) {
-        pl$ok <- FALSE
-        pl$msg <- paste0("ComplexUpset: ", ud$error)
-        return(pl)
+      genes_dir_mode <- "any"
+
+      if (direction_filter %in% c("concordant", "discordant")) {
+        ud0 <- .upset_cu_call_upset_data(mat, max_deg, 1, int_sets)
+        if (!is.null(ud0$error)) {
+          pl$ok <- FALSE
+          pl$msg <- paste0("ComplexUpset: ", ud0$error)
+          return(pl)
+        }
+        wide_sym0 <- cbind(symbol = pl$wide_presence$symbol, mat_presence, stringsAsFactors = FALSE)
+        genes0 <- .upset_cu_genes_by_intersection(
+          ud0, wide_sym0, direction_mode = direction_filter, fc_by_set_display = fc_by_set_dsp
+        )
+        keep_ints <- names(genes0)[vapply(genes0, length, integer(1L)) >= min_sz]
+        if (length(keep_ints) < 1L) {
+          pl$ok <- FALSE
+          pl$msg <- paste0(
+            "No ", direction_filter, " intersections after applying direction and minimum size filters."
+          )
+          return(pl)
+        }
+        genes0 <- genes0[keep_ints]
+        mat2 <- .upset_rebuild_mat_from_genes_by_int(genes0, ud0, colnames(mat))
+        if (is.null(mat2) || ncol(mat2) < 2L || nrow(mat2) < 1L) {
+          pl$ok <- FALSE
+          pl$msg <- paste0("No ", direction_filter, " intersections after rebuilding membership matrix.")
+          return(pl)
+        }
+        mat <- mat2[, colnames(mat), drop = FALSE]
+        int_sets <- .upset_cu_intersections_setting(max_deg, ncol(mat))
+        ud <- .upset_cu_call_upset_data(mat, max_deg, min_sz, int_sets)
+        if (!is.null(ud$error)) {
+          pl$ok <- FALSE
+          pl$msg <- paste0("ComplexUpset: ", ud$error)
+          return(pl)
+        }
+        genes_dir_mode <- "any"
+      } else {
+        ud <- .upset_cu_call_upset_data(mat, max_deg, min_sz, int_sets)
+        if (!is.null(ud$error)) {
+          pl$ok <- FALSE
+          pl$msg <- paste0("ComplexUpset: ", ud$error)
+          return(pl)
+        }
+        genes_dir_mode <- if (direction_filter %in% c("up", "down")) "any" else direction_filter
       }
+
       if (length(ud$plot_intersections_subset) < 1L) {
         pl$ok <- FALSE
         pl$msg <- "No intersections after applying max degree filter."
         return(pl)
       }
-      wide_sym <- cbind(symbol = pl$wide$symbol, mat, stringsAsFactors = FALSE)
-      genes_by_int <- .upset_cu_genes_by_intersection(ud, wide_sym)
+      wide_sym <- if (identical(direction_filter, "any")) {
+        cbind(symbol = pl$wide_presence$symbol, mat, stringsAsFactors = FALSE)
+      } else if (direction_filter %in% c("concordant", "discordant")) {
+        cbind(symbol = rownames(mat), mat, stringsAsFactors = FALSE)
+      } else {
+        cbind(symbol = pl$wide_presence$symbol, mat, stringsAsFactors = FALSE)
+      }
+      genes_by_int <- .upset_cu_genes_by_intersection(
+        ud, wide_sym, direction_mode = genes_dir_mode, fc_by_set_display = fc_by_set_dsp
+      )
       gf <- ud$matrix_frame$group
       plot_y_order <- if (is.factor(gf)) rev(levels(gf)) else rev(unique(as.character(gf)))
       pl$m_comb <- ch$m
@@ -888,6 +1275,7 @@ upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_paren
       )
       pl$cu <- list(
         mat = mat,
+        mat_presence = mat_presence,
         genes_by_int = genes_by_int,
         tooltip_by_int = .upset_cu_tooltip_by_intersection(ud, genes_by_int, plot_y_order),
         disp_to_sid = stats::setNames(pl$set_sid, dsp),
@@ -922,6 +1310,12 @@ upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_paren
         } else {
           " Empty intersections (0 genes) are never shown. "
         }
+        dir_note <- .upset_direction_status_label(pl$direction_filter %||% "any")
+        set_note <- if (!identical(pl$direction_filter %||% "any", "any")) {
+          " Set sizes show all threshold-passing genes per list (direction filter applies to intersections only). "
+        } else {
+          ""
+        }
         shiny::tags$div(
           class = "text-muted",
           style = "font-size: 0.9rem;",
@@ -931,6 +1325,8 @@ upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_paren
             ". Max degree ", pl$max_degree,
             ". Mode: intersect (inclusive), not distinct.",
             min_note,
+            dir_note,
+            set_note,
             pair_note,
             "Study row striping uses ColorBrewer Set3 in main-config study order (swatches below). ",
             "Click a black (active) dot on a row to open that DEG list on the DEGs tab with the intersection gene set. ",
@@ -942,8 +1338,43 @@ upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_paren
       }
     })
 
+    upset_ggplot_spec <- shiny::reactive({
+      .upset_cu_build_ggplot(upset_payload(), interactive = TRUE)
+    })
+
+    output$upset_plot_dl_ui <- shiny::renderUI({
+      spec <- upset_ggplot_spec()
+      if (!isTRUE(spec$ok)) return(NULL)
+      shiny::downloadLink(
+        session$ns("upset_plot_dl"),
+        label = "Download SVG",
+        class = "btn btn-sm btn-outline-secondary",
+        style = "margin-bottom: 8px; display: inline-block;"
+      )
+    })
+
+    output$upset_plot_dl <- shiny::downloadHandler(
+      filename = function() {
+        paste0(upset_download_basename("intersections"), ".svg")
+      },
+      content = function(file) {
+        spec <- .upset_cu_build_ggplot(shiny::isolate(upset_payload()), interactive = FALSE)
+        if (!isTRUE(spec$ok) || is.null(spec$plot)) {
+          stop(spec$msg %||% "UpSet plot is not available.", call. = FALSE)
+        }
+        ggplot2::ggsave(
+          filename = file,
+          plot = spec$plot,
+          width = spec$width_svg,
+          height = spec$height_svg,
+          device = "svg",
+          limitsize = FALSE
+        )
+      }
+    )
+
     output$upset_plot <- ggiraph::renderGirafe({
-      pl <- upset_payload()
+      spec <- upset_ggplot_spec()
       mk_empty <- function(msg) {
         gp <- ggplot2::ggplot() +
           ggplot2::annotate("text", x = 0.5, y = 0.5, label = msg) +
@@ -956,109 +1387,13 @@ upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_paren
       if (!requireNamespace("ggiraph", quietly = TRUE)) {
         return(mk_empty("Package ggiraph is required for the UpSet plot."))
       }
-      if (!requireNamespace("ComplexUpset", quietly = TRUE)) {
-        return(mk_empty("Package ComplexUpset is required for the UpSet plot."))
+      if (!isTRUE(spec$ok)) {
+        return(mk_empty(spec$msg %||% "No data."))
       }
-      if (!isTRUE(pl$ok)) {
-        return(mk_empty(pl$msg %||% "No data."))
-      }
-      mat <- pl$cu$mat
-      if (is.null(mat) || ncol(mat) < 2L) {
-        return(mk_empty("Need at least two non-empty DEG lists to draw an UpSet."))
-      }
-      tips <- pl$cu$tooltip_by_int
-      if (is.null(tips) || length(tips) < 1L) {
-        tips <- character(0)
-      }
-      # Bake study_id + deg_file into data_id keyed by ComplexUpset's ENCODED id (not by
-      # colnames(mat) position — encode_sets=TRUE does NOT preserve column order). Use the
-      # sid_by_enc / deg_by_enc maps built in the payload from ud$non_sanitized_labels.
-      siddeg_sep <- .upset_siddeg_data_id_sep
-      sid_map <- pl$cu$sid_by_enc %||% character(0)
-      deg_map <- pl$cu$deg_by_enc %||% character(0)
-      enc_keys <- as.character(names(sid_map))
-      siddeg_by_enc <- stats::setNames(
-        vapply(enc_keys, function(enc) {
-          s <- as.character(sid_map[[enc]])
-          d <- as.character(deg_map[[enc]])
-          if (is.na(s)) s <- ""
-          if (is.na(d)) d <- ""
-          paste(s, d, sep = siddeg_sep)
-        }, character(1L)),
-        enc_keys
-      )
-      mx <- ComplexUpset::intersection_matrix(
-        geom = ggiraph::geom_point_interactive(
-          ggplot2::aes(
-            data_id = paste0(
-              as.character(.data$intersection),
-              "\x01",
-              unname(siddeg_by_enc[as.character(.data$group)]),
-              "\x01",
-              ifelse(as.logical(.data$value), "1", "0")
-            ),
-            tooltip = ifelse(
-              as.logical(.data$value),
-              ifelse(
-                is.na(tips[as.character(.data$intersection)]),
-                paste0(
-                  .upset_cu_tooltip_escape(as.character(.data$intersection)),
-                  "\nGenes in intersection: ?"
-                ),
-                tips[as.character(.data$intersection)]
-              ),
-              NA_character_
-            )
-          ),
-          size = 3
-        )
-      )
-      # Tighter intersection columns only; do not add coord_fixed or y-scale expand here —
-      # those apply only to the matrix and break vertical alignment with the set-size panel.
-      mx <- mx + ggplot2::scale_x_discrete(expand = ggplot2::expansion(mult = 0.012, add = 0.02))
-      int_sets <- pl$cu$intersections_setting %||% "observed"
-      # Custom bar annotation: must set mode to inclusive_intersection (same as upset mode "intersect").
-      # counts = FALSE: no numeric labels on bars (sizes still in tooltips / status / picker).
-      base_ann <- list(
-        `Intersection size` = ComplexUpset::intersection_size(
-          counts = FALSE,
-          mode = "inclusive_intersection"
-        )
-      )
-      p <- ComplexUpset::upset(
-        mat,
-        intersect = colnames(mat),
-        name = "Intersection",
-        mode = "intersect",
-        min_size = pl$min_intersection %||% 1,
-        min_degree = 2,
-        max_degree = pl$max_degree,
-        intersections = int_sets,
-        sort_sets = FALSE,
-        sort_intersections = "descending",
-        sort_intersections_by = "cardinality",
-        encode_sets = TRUE,
-        base_annotations = base_ann,
-        matrix = mx,
-        stripes = .upset_cu_stripes(mat, pl$study_ord, pl$cu$study_color_map),
-        height_ratio = 1,
-        width_ratio = 0.18,
-        themes = .upset_cu_upset_themes()
-      )
-      # One base annotation ("Intersection size"); shrink that row only + scale SVG height so
-      # the matrix row matches default row density (ComplexUpset uses rep(1, n_ann) for bars).
-      lay <- .upset_cu_shrink_bar_layout(
-        p,
-        height_ratio = 1,
-        bar_row_weight = .upset_cu_intersection_bar_row_weight,
-        base_height_svg = 7.6,
-        n_annotation_rows = 1L
-      )
-      wsvg <- .upset_cu_plot_width_svg(mat, pl$cu$n_intersections, pl$cu$intersection_degrees)
       ggiraph::girafe(
-        ggobj = lay$plot,
-        width_svg = wsvg,
-        height_svg = lay$height_svg,
+        ggobj = spec$plot,
+        width_svg = spec$width_svg,
+        height_svg = spec$height_svg,
         options = list(
           ggiraph::opts_selection(
             type = "single",
@@ -1075,7 +1410,7 @@ upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_paren
             )
           ),
           ggiraph::opts_sizing(rescale = FALSE),
-          ggiraph_toolbar_pngname(upset_download_basename("intersections"))
+          ggiraph_toolbar_interactive()
         )
       )
     })
@@ -1163,7 +1498,7 @@ upsetTabServer <- function(id, study_ids, study_labels, cfg, thr_overrides_paren
       {
         pl <- upset_payload()
         shiny::req(isTRUE(pl$ok))
-        df <- .upset_multiplicity_df(pl$wide, pl$set_cols)
+        df <- .upset_multiplicity_df(pl$wide_presence %||% pl$wide, pl$set_cols)
         if (nrow(df) < 1L || !requireNamespace("ggplot2", quietly = TRUE)) {
           return(invisible(NULL))
         }

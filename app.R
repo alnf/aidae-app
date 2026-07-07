@@ -453,20 +453,20 @@ ui <- secure_app(dashboardPage(
     ),
     shiny::conditionalPanel(
       condition = "input.navtabs == 'ora'",
-      numericInput("ora_min_overlap", label = "Minimum pathway size (minGSSize):", value = 10L, min = 1L, step = 1L),
-      numericInput("ora_min_count", label = "Minimum overlap (Count):", value = 5L, min = 1L, step = 1L),
+      numericInput("ora_min_overlap", label = "Minimum pathway size (minGSSize):", value = 1L, min = 1L, step = 1L),
+      numericInput("ora_min_count", label = "Minimum overlap (Count):", value = 1L, min = 1L, step = 1L),
       numericInput("ora_min_gene_ratio", label = "Minimum gene ratio:", value = 0.1, min = 0, max = 1, step = 0.01),
       selectInput(
         "ora_fdr_cutoff",
         label = "Maximum adjusted p-value (FDR):",
         choices = c("0.01" = 0.01, "0.05" = 0.05, "0.1" = 0.1, "0.5" = 0.5, "1" = 1),
-        selected = 1
+        selected = 0.1
       ),
       selectInput(
         "ora_pvalue_cutoff",
         label = "Maximum p-value:",
         choices = c("0.01" = 0.01, "0.05" = 0.05, "0.1" = 0.1, "0.5" = 0.5, "1" = 1),
-        selected = 1
+        selected = 0.05
       ),
       numericInput("ora_show_category", label = "Max pathways to show:", value = 20L, min = 1L, step = 1L),
       radioButtons(
@@ -543,6 +543,26 @@ ui <- secure_app(dashboardPage(
           ),
           selected = 1,
           width = "100%"
+        ),
+        shiny::checkboxInput(
+          "upset_require_direction",
+          label = "Filter intersections by direction",
+          value = FALSE
+        ),
+        shiny::conditionalPanel(
+          condition = "input.upset_require_direction == true",
+          selectInput(
+            "upset_direction",
+            label = "Direction filter:",
+            choices = c(
+              "Concordant (up or down)" = "concordant",
+              "Opposite sign across lists" = "discordant",
+              "Up in all lists" = "up",
+              "Down in all lists" = "down"
+            ),
+            selected = "concordant",
+            width = "100%"
+          )
         ),
         selectInput("upset_study", label = "Study (threshold target)", choices = upset_study_choices, selected = default_upset_study),
         selectInput("upset_deg_list", label = "DEG list (threshold target)", choices = default_upset_deg_choices, selected = default_upset_deg),
@@ -844,11 +864,18 @@ server <- function(input, output, session) {
     mis <- suppressWarnings(as.numeric(input$upset_min_intersection %||% 1))
     if (length(mis) != 1L || is.na(mis) || mis < 1) mis <- 1
     mis <- min(mis, 1e7)
+    dir_f <- if (isTRUE(input$upset_require_direction)) {
+      as.character(input$upset_direction %||% "concordant")[[1L]]
+    } else {
+      "any"
+    }
+    if (!dir_f %in% c("any", "concordant", "discordant", "up", "down")) dir_f <- "any"
     list(
       max_degree = md,
       min_intersection = mis,
       refresh = upset_refresh_n(),
-      row_sort = rs
+      row_sort = rs,
+      direction_filter = dir_f
     )
   })
 
@@ -1440,15 +1467,15 @@ server <- function(input, output, session) {
   })
 
   ora_input <- shiny::reactive({
-    mo <- if (is.null(input$ora_min_overlap)) 10L else input$ora_min_overlap
-    mc <- if (is.null(input$ora_min_count)) 5L else input$ora_min_count
+    mo <- if (is.null(input$ora_min_overlap)) 1L else input$ora_min_overlap
+    mc <- if (is.null(input$ora_min_count)) 1L else input$ora_min_count
     mgr <- if (is.null(input$ora_min_gene_ratio)) 0.1 else as.numeric(input$ora_min_gene_ratio)
     if (is.na(mgr) || mgr < 0) mgr <- 0
     if (mgr > 1) mgr <- 1
-    fdr_cut <- if (is.null(input$ora_fdr_cutoff)) 1 else as.numeric(input$ora_fdr_cutoff)
+    fdr_cut <- if (is.null(input$ora_fdr_cutoff)) 0.1 else as.numeric(input$ora_fdr_cutoff)
     if (is.na(fdr_cut) || fdr_cut <= 0) fdr_cut <- 1
     if (fdr_cut > 1) fdr_cut <- 1
-    p_cut <- if (is.null(input$ora_pvalue_cutoff)) 1 else as.numeric(input$ora_pvalue_cutoff)
+    p_cut <- if (is.null(input$ora_pvalue_cutoff)) 0.05 else as.numeric(input$ora_pvalue_cutoff)
     if (is.na(p_cut) || p_cut <= 0) p_cut <- 1
     if (p_cut > 1) p_cut <- 1
     sc <- if (is.null(input$ora_show_category)) 20L else input$ora_show_category
