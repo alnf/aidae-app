@@ -1,10 +1,13 @@
 # ORA long-form cache: precompute enrichment per study × DEG list × pathway DB, save RDS, filter when plotting.
-# Per-study RDS v2: one `long_df` with columns `pathway_file` and `comparison`; v1 legacy (single pathway) still loads.
+# Per-study RDS v2: one `long_df` with columns `pathway_file` and `comparison`; optional `completed`
+# (comparison × pathway_file × status "ok"|"empty") for incremental resume of empty results; v1 legacy still loads.
 # Depends: scripts/study_data.R, scripts/pathway_signatures.R, scripts/heatmap_utils.R (filter_heatmap_row_index, deg_list_threshold_defaults).
 # Optional: Bioconductor clusterProfiler.
 
 ORA_CACHE_VERSION <- 2L
 ORA_CACHE_VERSION_LEGACY <- 1L
+ORA_COMPLETED_STATUS_OK <- "ok"
+ORA_COMPLETED_STATUS_EMPTY <- "empty"
 
 # Sentinel pathway key for in-memory custom ontology (not on disk under databases/pathways/).
 ORA_CUSTOM_ONTOLOGY_KEY <- "__custom_ontology__"
@@ -403,6 +406,40 @@ ora_filter_long_by_visibility <- function(long_by_sid, deg_by_study) {
   out
 }
 
+#' Cap BLAS / OpenMP / similar to `n` threads **per R process**.
+#'
+#' `parallel::mclapply` with `--cores N` forks N workers; without this, each worker
+#' often spins its own BLAS/OpenMP pool (≈ N × detectCores() OS threads). Call in
+#' the parent before fork and at the start of every worker so `--cores N` means
+#' about N busy CPUs total.
+#'
+#' @param n Integer threads per process (default 1).
+#' @return `n` (invisible).
+ora_limit_numerical_threads <- function(n = 1L) {
+  n <- suppressWarnings(as.integer(n)[[1L]])
+  if (length(n) != 1L || is.na(n) || n < 1L) {
+    n <- 1L
+  }
+  ns <- as.character(n)
+  Sys.setenv(
+    OMP_NUM_THREADS = ns,
+    OPENBLAS_NUM_THREADS = ns,
+    MKL_NUM_THREADS = ns,
+    VECLIB_MAXIMUM_THREADS = ns,
+    NUMEXPR_NUM_THREADS = ns,
+    BLIS_NUM_THREADS = ns,
+    GOTO_NUM_THREADS = ns
+  )
+  if (requireNamespace("RhpcBLASctl", quietly = TRUE)) {
+    try(RhpcBLASctl::blas_set_num_threads(n), silent = TRUE)
+    try(RhpcBLASctl::omp_set_num_threads(n), silent = TRUE)
+  }
+  if (requireNamespace("data.table", quietly = TRUE)) {
+    try(data.table::setDTthreads(n), silent = TRUE)
+  }
+  invisible(n)
+}
+
 #' Resolve ORA parallel worker count (cap by cores and task count).
 #' @param workers `NULL` → `EXPRS_ORA_WORKERS` env, then `1`. Values `< 2` use sequential execution.
 ora_resolve_ora_workers <- function(workers, n_tasks) {
@@ -620,9 +657,11 @@ ora_execute_deg_tasks <- function(
       )
     }
   } else {
+    ora_limit_numerical_threads(1L)
     per <- parallel::mclapply(
       seq_len(n_tasks),
       function(i) {
+        ora_limit_numerical_threads(1L)
         tk <- tasks[[i]]
         ora_enrichment_one_deg_entry(
           tk$sid, tk$study_label, tk$entry,
@@ -746,26 +785,160 @@ ora_precompute_pathways_with_comparison <- function(long_df, comparison_label) {
   unique(as.character(long_df$pathway_file[m]))
 }
 
-#' One `readRDS` of the per-study cache: pathway files already present for this comparison (resume).
+#' Empty `completed` index (comparison × pathway_file × status).
+ora_completed_empty_df <- function() {
+  data.frame(
+    comparison = character(0),
+    pathway_file = character(0),
+    status = character(0),
+    stringsAsFactors = FALSE
+  )
+}
+
+#' Normalize / coerce a `completed` data.frame.
+ora_normalize_completed <- function(completed) {
+  if (is.null(completed) || !is.data.frame(completed) || nrow(completed) < 1L) {
+    return(ora_completed_empty_df())
+  }
+  need <- c("comparison", "pathway_file", "status")
+  if (!all(need %in% colnames(completed))) {
+    return(ora_completed_empty_df())
+  }
+  out <- data.frame(
+    comparison = as.character(completed$comparison),
+    pathway_file = as.character(completed$pathway_file),
+    status = as.character(completed$status),
+    stringsAsFactors = FALSE
+  )
+  out <- out[
+    nzchar(out$comparison) & nzchar(out$pathway_file) &
+      out$status %in% c(ORA_COMPLETED_STATUS_OK, ORA_COMPLETED_STATUS_EMPTY),
+    ,
+    drop = FALSE
+  ]
+  if (nrow(out) < 1L) {
+    return(ora_completed_empty_df())
+  }
+  # Last write wins for duplicate keys.
+  keys <- paste(out$comparison, out$pathway_file, sep = "\r")
+  out[!duplicated(keys, fromLast = TRUE), , drop = FALSE]
+}
+
+#' Seed `completed` with status "ok" from enrichment rows (legacy RDS without `completed`).
+ora_completed_from_long_df <- function(long_df) {
+  if (is.null(long_df) || !is.data.frame(long_df) || nrow(long_df) < 1L) {
+    return(ora_completed_empty_df())
+  }
+  if (!all(c("comparison", "pathway_file") %in% colnames(long_df))) {
+    return(ora_completed_empty_df())
+  }
+  keys <- unique(paste(
+    as.character(long_df$comparison),
+    as.character(long_df$pathway_file),
+    sep = "\r"
+  ))
+  keys <- keys[nzchar(keys) & keys != "\r"]
+  if (length(keys) < 1L) {
+    return(ora_completed_empty_df())
+  }
+  parts <- strsplit(keys, "\r", fixed = TRUE)
+  data.frame(
+    comparison = vapply(parts, `[[`, character(1L), 1L),
+    pathway_file = vapply(parts, `[[`, character(1L), 2L),
+    status = ORA_COMPLETED_STATUS_OK,
+    stringsAsFactors = FALSE
+  )
+}
+
+#' `completed` from an RDS object, migrating from `long_df` when the field is missing.
+ora_completed_from_obj <- function(obj) {
+  if (is.null(obj) || !is.list(obj)) {
+    return(ora_completed_empty_df())
+  }
+  if (!is.null(obj$completed)) {
+    return(ora_normalize_completed(obj$completed))
+  }
+  ora_completed_from_long_df(obj$long_df)
+}
+
+#' Upsert completed rows for one comparison × pathway set (`status` recycled to pathway length).
+ora_completed_upsert <- function(completed, comparison_label, pathway_files, status) {
+  base <- ora_normalize_completed(completed)
+  cmp <- as.character(comparison_label)
+  pfs <- unique(as.character(pathway_files))
+  pfs <- pfs[nzchar(pfs)]
+  if (length(pfs) < 1L || !nzchar(cmp)) {
+    return(base)
+  }
+  st <- as.character(status)
+  if (length(st) == 1L) {
+    st <- rep(st, length(pfs))
+  }
+  if (length(st) != length(pfs)) {
+    stop("status length must be 1 or match pathway_files", call. = FALSE)
+  }
+  bad <- !st %in% c(ORA_COMPLETED_STATUS_OK, ORA_COMPLETED_STATUS_EMPTY)
+  if (any(bad)) {
+    stop("status must be 'ok' or 'empty'", call. = FALSE)
+  }
+  if (nrow(base) > 0L) {
+    keep <- !(as.character(base$comparison) == cmp & as.character(base$pathway_file) %in% pfs)
+    base <- base[keep, , drop = FALSE]
+  }
+  rbind(
+    base,
+    data.frame(
+      comparison = rep(cmp, length(pfs)),
+      pathway_file = pfs,
+      status = st,
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
+#' Pathway files already finished for this comparison (`completed` ok|empty, else `long_df` rows).
+ora_precompute_pathways_done_from_obj <- function(obj, comparison_label) {
+  cmp <- as.character(comparison_label)
+  if (!nzchar(cmp)) {
+    return(character(0))
+  }
+  completed <- ora_completed_from_obj(obj)
+  if (nrow(completed) > 0L) {
+    m <- as.character(completed$comparison) == cmp
+    if (any(m)) {
+      return(unique(as.character(completed$pathway_file[m])))
+    }
+  }
+  ora_precompute_pathways_with_comparison(
+    if (!is.null(obj) && is.list(obj)) obj$long_df else NULL,
+    cmp
+  )
+}
+
+#' One `readRDS` of the per-study cache: pathway files already done for this comparison (resume).
 #'
-#' Call **once** per DEG-list round, then test membership in the returned vector — not once per ontology.
+#' Includes empty enrichments recorded in `completed` (status `"empty"`). Call **once** per
+#' DEG-list round, then test membership — not once per ontology.
 ora_precompute_resume_pathways_done_for_comparison <- function(out_path, comparison_label) {
   op <- trimws(as.character(out_path))
   if (!nzchar(op) || !file.exists(op)) {
     return(character(0))
   }
   obj <- tryCatch(readRDS(op), error = function(e) NULL)
-  if (is.null(obj) || !is.data.frame(obj$long_df) || nrow(obj$long_df) < 1L) {
+  if (is.null(obj) || !is.list(obj)) {
     return(character(0))
   }
   ver <- suppressWarnings(as.integer(obj$version))
   if (length(ver) != 1L || is.na(ver) || ver != ORA_CACHE_VERSION) {
     return(character(0))
   }
-  ora_precompute_pathways_with_comparison(obj$long_df, comparison_label)
+  if (!is.data.frame(obj$long_df) && is.null(obj$completed)) {
+    return(character(0))
+  }
+  ora_precompute_pathways_done_from_obj(obj, comparison_label)
 }
 
-#' TRUE if per-study ORA RDS already contains rows for this comparison × pathway (resume).
+#' TRUE if per-study ORA RDS already finished this comparison × pathway (resume).
 #'
 #' Uses one `readRDS` per call; for many ontologies prefer
 #' [ora_precompute_resume_pathways_done_for_comparison] once, then `%in%` on the result.
@@ -809,11 +982,13 @@ ora_precompute_incremental_merge_save <- function(
   }
   existing_df <- if (!is.null(existing_obj)) existing_obj$long_df else NULL
   frag <- NULL
+  status <- ORA_COMPLETED_STATUS_EMPTY
   if (!is.null(one_comparison_df_or_null) && is.data.frame(one_comparison_df_or_null) &&
       nrow(one_comparison_df_or_null) > 0L) {
     frag <- one_comparison_df_or_null
     frag$pathway_file <- as.character(pathway_file)
     frag$study_label <- as.character(study_label_str)
+    status <- ORA_COMPLETED_STATUS_OK
   }
   merged <- ora_long_df_merge_replace_comparison_pathways(
     existing_df,
@@ -831,19 +1006,26 @@ ora_precompute_incremental_merge_save <- function(
   } else {
     Sys.time()
   }
+  completed <- ora_completed_upsert(
+    ora_completed_from_obj(existing_obj),
+    as.character(comparison_label),
+    c(as.character(pathway_file)),
+    status
+  )
   obj <- list(
     version = ORA_CACHE_VERSION,
     study_id = sid,
     pathway_files = pathway_files_union,
     created = cre,
-    long_df = merged
+    long_df = merged,
+    completed = completed
   )
   dir.create(dirname(op), recursive = TRUE, showWarnings = FALSE)
   saveRDS(obj, op)
   ora_sync_shards_after_monolith_write(sid, obj, pathway_files = as.character(pathway_file))
   message(
     "[incremental] ", basename(op), ": ", nrow(merged), " row(s) total — ",
-    comparison_label, " × ", pathway_file
+    comparison_label, " × ", pathway_file, " [", status, "]"
   )
   invisible(TRUE)
 }
@@ -896,6 +1078,7 @@ ora_precompute_incremental_merge_round <- function(
   }
 
   pfs_merged <- character(0)
+  statuses <- character(0)
   pieces <- list()
   for (r in round_results) {
     if (!identical(r$kind, "merge")) {
@@ -909,10 +1092,20 @@ ora_precompute_incremental_merge_round <- function(
       x$pathway_file <- pf
       x$study_label <- as.character(study_label_str)
       pieces[[length(pieces) + 1L]] <- x
+      statuses <- c(statuses, ORA_COMPLETED_STATUS_OK)
+    } else {
+      statuses <- c(statuses, ORA_COMPLETED_STATUS_EMPTY)
     }
   }
-  pfs_merged <- unique(pfs_merged)
+  # Deduplicate pathway files (last status wins if duplicates).
+  if (length(pfs_merged) > 0L) {
+    ord <- !duplicated(pfs_merged, fromLast = TRUE)
+    pfs_merged <- pfs_merged[ord]
+    statuses <- statuses[ord]
+  }
   n_merge <- length(pfs_merged)
+  n_empty <- sum(statuses == ORA_COMPLETED_STATUS_EMPTY)
+  n_ok <- sum(statuses == ORA_COMPLETED_STATUS_OK)
 
   new_block <- NULL
   if (length(pieces) > 0L) {
@@ -941,20 +1134,28 @@ ora_precompute_incremental_merge_round <- function(
     pfs_merged
   )
   pathway_files_union <- unique(c(pathway_files_union, pfs_merged))
+  completed <- ora_completed_upsert(
+    ora_completed_from_obj(existing_obj),
+    cmp,
+    pfs_merged,
+    statuses
+  )
 
   obj <- list(
     version = ORA_CACHE_VERSION,
     study_id = sid,
     pathway_files = pathway_files_union,
     created = cre,
-    long_df = merged
+    long_df = merged,
+    completed = completed
   )
   dir.create(dirname(op), recursive = TRUE, showWarnings = FALSE)
   saveRDS(obj, op)
   ora_sync_shards_after_monolith_write(sid, obj, pathway_files = unique(pfs_merged))
   message(
     "[incremental-round] ", basename(op), ": ", nrow(merged), " row(s) total — ",
-    cmp, " × ", n_merge, " ontology file(s) merged in one write"
+    cmp, " × ", n_merge, " ontology file(s) merged in one write",
+    " (ok=", n_ok, ", empty=", n_empty, ")"
   )
   invisible(list(wrote = TRUE, pathway_files_merged = unique(pfs_merged)))
 }

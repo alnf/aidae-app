@@ -353,6 +353,32 @@ parse_ontology_file_for_ora <- function(path) {
 #'
 #' `.gmx` format: classical GSEA matrix where columns are pathways:
 #' row 1 = pathway names, row 2 = descriptions, rows 3+ = genes.
+#' Strip Enrichr-style `GENE,score` weights when the suffix is numeric.
+#'
+#' Plain gene symbols (no comma) and tokens whose suffix is non-numeric are unchanged.
+#' Safe for future libraries: only strips when a comma-separated numeric weight is present
+#' (same convention as Maayan Lab Enrichr parsers: take text before the first comma).
+ora_strip_enrichr_gene_scores <- function(genes) {
+  g <- as.character(genes)
+  if (length(g) < 1L) {
+    return(g)
+  }
+  m <- regexpr(",", g, fixed = TRUE)
+  has <- !is.na(m) & m > 0L
+  if (!any(has)) {
+    return(g)
+  }
+  idx <- which(has)
+  suffix <- substring(g[idx], m[idx] + 1L)
+  num <- suppressWarnings(as.numeric(suffix))
+  strip <- !is.na(num) & nzchar(suffix)
+  if (any(strip)) {
+    si <- idx[strip]
+    g[si] <- substring(g[si], 1L, m[si] - 1L)
+  }
+  g
+}
+
 parse_pathway_file_to_term2gene <- function(rel_filename) {
   full <- file.path("databases/pathways", rel_filename)
   key <- paste0("t2g|", rel_filename)
@@ -385,7 +411,9 @@ parse_pathway_file_to_term2gene <- function(rel_filename) {
             if (!nzchar(tn)) next
             genes <- trimws(mat[gene_start_row:nrow(mat), j])
             genes <- genes[nzchar(genes)]
+            genes <- ora_strip_enrichr_gene_scores(genes)
             genes <- unique(genes)
+            genes <- genes[nzchar(genes)]
             if (length(genes) < 1L) next
             term <- c(term, rep(tn, length(genes)))
             gene <- c(gene, genes)
@@ -404,7 +432,9 @@ parse_pathway_file_to_term2gene <- function(rel_filename) {
       if (!nzchar(tn)) next
       genes <- trimws(parts[-1L])
       genes <- genes[nzchar(genes)]
+      genes <- ora_strip_enrichr_gene_scores(genes)
       genes <- unique(genes)
+      genes <- genes[nzchar(genes)]
       if (length(genes) < 1L) next
       term <- c(term, rep(tn, length(genes)))
       gene <- c(gene, genes)

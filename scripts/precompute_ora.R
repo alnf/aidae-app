@@ -13,8 +13,9 @@
 #     One DEG list from one study (path as in config, or comparison label). Merges into
 #     existing enrichment.rds when present (replaces rows for that comparison × pathway files run).
 #   Rscript scripts/precompute_ora.R [--cores N] ...
-#     Parallel ORA: --cores overrides EXPRS_ORA_WORKERS for this process (use 1 for sequential).
-#     At most one parallel layer runs at a time:
+#     Parallel ORA: --cores N = at most N R worker processes (overrides EXPRS_ORA_WORKERS).
+#     Each worker is forced to 1 BLAS/OpenMP thread so total CPU ≈ N (not N × BLAS threads).
+#     Use --cores 1 for fully sequential. At most one parallel layer runs at a time:
 #     - ≥2 pathway/ontology files: parallel across those files; DEG lists run sequentially per file.
 #     - Exactly 1 pathway file: parallel across DEG lists when there are ≥2 (like the Shiny ORA tab).
 #     - Full batch, one pathway file, every study has ≤1 DEG list: parallel across studies.
@@ -160,6 +161,7 @@ print_usage <- function() {
     "    One DEG list only; merges into existing per-study RDS (v2) when present.\n",
     "  Rscript scripts/precompute_ora.R [--cores N] ...\n",
     "    Optional: parallel ORA (one layer: ontologies vs DEG lists vs studies — see file header).\n",
+    "    --cores N = at most N R workers; each uses 1 BLAS/OpenMP thread (≈ N CPUs total).\n",
     "    --cores 1 is sequential. Overrides EXPRS_ORA_WORKERS for this run when N >= 1.\n",
     "  Rscript scripts/precompute_ora.R [--incremental | --no-incremental] ...\n",
     "    --incremental: merge-save RDS for crash-resume (per-DEG after all ontologies when parallel).\n",
@@ -193,6 +195,12 @@ source("scripts/study_data.R")
 source("scripts/perf_utils.R")
 source("scripts/pathway_signatures.R")
 source("scripts/ora_cache.R")
+# Before any fork: one BLAS/OpenMP thread per R process so --cores N ≈ N CPUs.
+ora_limit_numerical_threads(1L)
+message(
+  "[ORA precompute] numerical threads per process limited to 1 ",
+  "(OMP/OpenBLAS/MKL/etc.); --cores N ≈ N CPUs total"
+)
 
 resolve_pathway_files <- function(pathway_positional, pathway_mode = "all") {
   mode <- as.character(pathway_mode)[[1L]]
@@ -330,12 +338,23 @@ precompute_pathway_one_index <- function(
     cmp_done_for_pf <- character(0)
     if (file.exists(out_path)) {
       obj_pf <- tryCatch(readRDS(out_path), error = function(e) NULL)
-      if (!is.null(obj_pf) && is.data.frame(obj_pf$long_df) && nrow(obj_pf$long_df) > 0L &&
-          all(c("comparison", "pathway_file") %in% colnames(obj_pf$long_df))) {
-        ld_pf <- obj_pf$long_df
-        mm <- as.character(ld_pf$pathway_file) == as.character(pf)
-        if (any(mm)) {
-          cmp_done_for_pf <- unique(as.character(ld_pf$comparison[mm]))
+      if (!is.null(obj_pf) && is.list(obj_pf)) {
+        ver_pf <- suppressWarnings(as.integer(obj_pf$version))
+        if (length(ver_pf) == 1L && !is.na(ver_pf) && ver_pf == ORA_CACHE_VERSION) {
+          completed_pf <- ora_completed_from_obj(obj_pf)
+          if (nrow(completed_pf) > 0L) {
+            mm <- as.character(completed_pf$pathway_file) == as.character(pf)
+            if (any(mm)) {
+              cmp_done_for_pf <- unique(as.character(completed_pf$comparison[mm]))
+            }
+          } else if (is.data.frame(obj_pf$long_df) && nrow(obj_pf$long_df) > 0L &&
+              all(c("comparison", "pathway_file") %in% colnames(obj_pf$long_df))) {
+            ld_pf <- obj_pf$long_df
+            mm <- as.character(ld_pf$pathway_file) == as.character(pf)
+            if (any(mm)) {
+              cmp_done_for_pf <- unique(as.character(ld_pf$comparison[mm]))
+            }
+          }
         }
       }
     }
@@ -463,9 +482,11 @@ precompute_one_study_chunks <- function(
           message("[skip] ", sid, " — ", cmp, " has no usable DEG genes after filters")
           next
         }
+        ora_limit_numerical_threads(1L)
         rnd <- parallel::mclapply(
           seq_len(n_pf),
           function(pi) {
+            ora_limit_numerical_threads(1L)
             t0 <- unname(as.numeric(Sys.time()))
             pf <- pathway_files_to_run[[pi]]
             message(
@@ -476,6 +497,21 @@ precompute_one_study_chunks <- function(
               " | ", pf,
               " | pid=", Sys.getpid()
             )
+            # Resume before parsing GMT (large Enrichr files dominate skip wall time).
+            if (pf %in% pfs_done_cmp) {
+              dt <- unname(as.numeric(Sys.time())) - t0
+              message(
+                "[ontology-done] ", sid,
+                " | deg ", deg_progress,
+                " | ", cmp,
+                " | ", pi, "/", n_pf,
+                " | ", pf,
+                " | resume-skip",
+                " | elapsed=", sprintf("%.2f", dt), "s",
+                " | pid=", Sys.getpid()
+              )
+              return(list(kind = "resume", pf = pf, fr = NULL, elapsed_sec = dt))
+            }
             t2g <- parse_pathway_file_to_term2gene(pf)
             if (is.null(t2g) || nrow(t2g) == 0L) {
               dt <- unname(as.numeric(Sys.time())) - t0
@@ -490,20 +526,6 @@ precompute_one_study_chunks <- function(
                 " | pid=", Sys.getpid()
               )
               return(list(kind = "file", pf = pf, fr = NULL, elapsed_sec = dt))
-            }
-            if (pf %in% pfs_done_cmp) {
-              dt <- unname(as.numeric(Sys.time())) - t0
-              message(
-                "[ontology-done] ", sid,
-                " | deg ", deg_progress,
-                " | ", cmp,
-                " | ", pi, "/", n_pf,
-                " | ", pf,
-                " | resume-skip",
-                " | elapsed=", sprintf("%.2f", dt), "s",
-                " | pid=", Sys.getpid()
-              )
-              return(list(kind = "resume", pf = pf, fr = NULL, elapsed_sec = dt))
             }
             t2g_u <- data.frame(
               term = t2g$term,
@@ -583,9 +605,11 @@ precompute_one_study_chunks <- function(
       "[ORA precompute] ", sid, ": ontology-parallel (", path_w, " workers) over ",
       n_pf, " pathway file(s); DEG lists sequential within each ontology."
     )
+    ora_limit_numerical_threads(1L)
     pl_raw <- parallel::mclapply(
       seq_len(n_pf),
       function(pi) {
+        ora_limit_numerical_threads(1L)
         precompute_pathway_one_index(
           sid, slbl, pathway_files_to_run, pi, den, deg_filter,
           ora_workers = 1L,
@@ -652,6 +676,8 @@ save_study_ora_rds <- function(
     deg_filter,
     out_path) {
   merge_partial <- !is.null(deg_filter)
+  existing <- NULL
+  completed <- ora_completed_empty_df()
 
   if (merge_partial) {
     lists_f <- ora_filter_deg_lists(study_deg_lists(sid), deg_filter)
@@ -682,6 +708,7 @@ save_study_ora_rds <- function(
         as.character(existing$pathway_files),
         pathway_files_ok
       ))
+      completed <- ora_completed_from_obj(existing)
     } else {
       message(
         "[note] No existing RDS at ", out_path,
@@ -689,23 +716,46 @@ save_study_ora_rds <- function(
       )
       pathway_files_union <- pathway_files_ok
     }
+    pfs <- unique(as.character(pathway_files_ok))
+    pfs <- pfs[nzchar(pfs)]
+    if (length(pfs) > 0L) {
+      statuses <- vapply(pfs, function(pf) {
+        if (is.data.frame(long_df) && nrow(long_df) > 0L &&
+            all(c("comparison", "pathway_file") %in% colnames(long_df)) &&
+            any(as.character(long_df$comparison) == cmp_lbl &
+                  as.character(long_df$pathway_file) == pf)) {
+          ORA_COMPLETED_STATUS_OK
+        } else {
+          ORA_COMPLETED_STATUS_EMPTY
+        }
+      }, character(1L))
+      completed <- ora_completed_upsert(completed, cmp_lbl, pfs, unname(statuses))
+    }
   } else {
     pathway_files_union <- pathway_files_ok
+    completed <- ora_completed_from_long_df(long_df)
   }
 
+  cre <- if (!is.null(existing) && !is.null(existing$created)) {
+    existing$created
+  } else {
+    Sys.time()
+  }
   obj <- list(
     version = ORA_CACHE_VERSION,
     study_id = sid,
     pathway_files = pathway_files_union,
-    created = Sys.time(),
-    long_df = long_df
+    created = cre,
+    long_df = long_df,
+    completed = completed
   )
   dir.create(dirname(out_path), recursive = TRUE, showWarnings = FALSE)
   saveRDS(obj, out_path)
   ora_sync_shards_after_monolith_write(sid, obj, pathway_files = pathway_files_union)
   message(
     "[saved] ", sid, " -> ", out_path,
-    " (", nrow(long_df), " rows; ", length(pathway_files_union), " pathway files in index)"
+    " (", nrow(long_df), " rows; ", length(pathway_files_union), " pathway files in index",
+    "; completed=", nrow(completed), ")"
   )
 }
 
@@ -835,9 +885,11 @@ run_batch <- function(study_ids, workers = NULL) {
       "[ORA precompute] study-parallel: ", sp$w, " workers × ", length(study_ids),
       " studies (one pathway file each, ≤1 DEG list per study)."
     )
+    ora_limit_numerical_threads(1L)
     parallel::mclapply(
       study_ids,
       function(sid) {
+        ora_limit_numerical_threads(1L)
         tryCatch(
           precompute_run_one_study(sid, pathway_files_to_run, deg_filter, workers, incremental = precompute_incremental),
           error = function(e) {

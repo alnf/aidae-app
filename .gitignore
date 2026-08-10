@@ -65,3 +65,5 @@ rsconnect.sh
 config.yaml
 deploy/apps/*
 AGENTS.md
+scripts/external/*
+TODO.md

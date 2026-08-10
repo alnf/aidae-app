@@ -134,16 +134,16 @@ The ORA dot plot is interactive with **ggiraph**:
 
 Sidebar filters for ORA include minimum overlap count, minimum pathway size, minimum gene ratio, and **maximum adjusted p-value (FDR)**. Default FDR cutoff is `1` (no FDR filtering), so behavior stays as before unless you choose a stricter threshold. Top-`N` pathway display still follows existing ranking by enrichment significance (`p_adj` / p-value order).
 
-**Parallel ORA (optional):** work is split with `parallel::mclapply` (forking on Unix/macOS; Windows stays effectively sequential). Set **`EXPRS_ORA_WORKERS`** to an integer ≥ `2`, or use **`scripts/precompute_ora.R --cores N`**. The effective worker count is capped by `parallel::detectCores()` (logical CPUs) and by the **number of parallel tasks** at the active layer (set workers lower if you want to leave cores free).
+**Parallel ORA (optional):** work is split with `parallel::mclapply` (forking on Unix/macOS; Windows stays effectively sequential). Set **`EXPRS_ORA_WORKERS`** to an integer ≥ `2`, or use **`scripts/precompute_ora.R --cores N`**. **`--cores N` means at most N R worker processes**; each worker is forced to **1 BLAS/OpenMP thread** (`ora_limit_numerical_threads(1)`), so total CPU use should stay near N — not N × (BLAS threads per process). The worker count is also capped by `parallel::detectCores()` and by the number of parallel tasks at the active layer.
 
 **Layers (only one layer runs in parallel at a time):**
 
 - **Shiny ORA tab / custom ontology:** one pathway database (or one custom ontology) per run. If a study has several DEG lists, jobs are **parallel across studies × DEG lists** for that ontology. With **one DEG list per study**, there is only one job per study, so you still only get parallelism when **multiple studies** each contribute a task.
 - **`scripts/precompute_ora.R`:** (1) If this run includes **several pathway / ontology files**, precompute uses **ontology-parallel** (`mclapply` over files); **DEG lists run sequentially** inside each ontology (avoids nested parallel). (2) If there is **exactly one** pathway file for the study, precompute can use **DEG-list parallel** when there are **≥2 DEG lists** (same idea as the Shiny ORA tab for one database). (3) On a **full multi-study batch** with **exactly one pathway file** in the run and **at most one DEG list per study**, it can run **studies in parallel**. Nested `mclapply` is deliberately avoided.
-- **Incremental RDS (`--incremental` or `EXPRS_ORA_INCREMENTAL=1`):** the script updates the per-study `enrichment.rds` so a crash leaves partial work. **Single ontology:** merge-save **after each DEG list** (sequential ontologies). **Several ontologies + parallel:** for each DEG list, `enricher` runs **in parallel across all ontologies**, then the parent performs **one** read–merge–write for that comparison across all ontologies (no file locking). Re-run the same command to **resume** (`[resume-skip]`). For a full refresh, remove the RDS or use **`--no-incremental`**.
+- **Incremental RDS (`--incremental` or `EXPRS_ORA_INCREMENTAL=1`):** the script updates the per-study `enrichment.rds` so a crash leaves partial work. **Single ontology:** merge-save **after each DEG list** (sequential ontologies). **Several ontologies + parallel:** for each DEG list, `enricher` runs **in parallel across all ontologies**, then the parent performs **one** read–merge–write for that comparison across all ontologies (no file locking). Re-run the same command to **resume** (`[resume-skip]`). Resume uses a `completed` index on the RDS (`comparison` × `pathway_file` × status `ok`|`empty`) so empty enrichments are not re-parsed/re-run; legacy RDS without `completed` still resume from rows in `long_df`. Enrichr `GENE,score` weights are stripped when parsing pathway files (plain gene symbols unchanged). For a full refresh, remove the RDS or use **`--no-incremental`**.
 - **Heavy / light ontology buckets (`databases/pathways_list.yaml`):** optional keys `pathways_heavy` and `pathways_list` define the master list; **`--light`** runs `setdiff(pathways_list, pathways_heavy)` (or explicit `pathways_light` if set), **`--heavy`** runs `pathways_heavy` only. Logs include **`[ontology-done]`** / **`[deg-round]`** timings for profiling.
 
-Per-step Shiny progress updates run only in single-core mode; with parallel ORA the progress bar advances once when the parallel phase finishes. **`--cores 1`** forces sequential precompute and overrides `EXPRS_ORA_WORKERS` for that run. R/BLAS may still use extra threads per process unless you set **`OMP_NUM_THREADS=1`** (and similar), so `htop` can show more busy CPUs than the ORA worker count.
+Per-step Shiny progress updates run only in single-core mode; with parallel ORA the progress bar advances once when the parallel phase finishes. **`--cores 1`** forces sequential precompute and overrides `EXPRS_ORA_WORKERS` for that run. Precompute and parallel Shiny ORA paths set **`OMP_NUM_THREADS` / OpenBLAS / MKL (etc.) to 1** automatically; if you still see runaway threads, install **RhpcBLASctl** for stronger BLAS control, or lower `--cores` (large ontologies also use a lot of **RAM** per worker even when CPU is capped).
 
 **ORA tab load cache (Shiny session):** the app keeps an **in-memory cache** for the Shiny session (deserialized RDS per file path + filtered slices per ontology). Switching back to an ontology you already opened avoids repeated disk I/O. Restart the app or update `enrichment.rds` / shard files on disk to clear the cache.
 
@@ -211,11 +211,32 @@ This writes `databases/pathways_list.yaml` with a `pathways_list:` key. You can 
 pathways_list: databases/pathways_list.yaml
 ```
 
+### Adding a study
+
+From the repository root, use these scripts to validate and build study artifacts (agent-friendly; exit non-zero on hard failures):
+
+```bash
+Rscript scripts/check_study_raw.R --study <study_id>           # DEG / metadata / counts schema
+Rscript scripts/check_study_config.R --study <study_id>        # config.yaml + comps.tsv consistency
+Rscript scripts/convert_study_counts.R --study <study_id>      # counts TSV → sibling .rds
+Rscript scripts/build_gdegs_long.R --study <study_id>          # write gdegs_file from deg_lists + comps
+Rscript scripts/precompute_ora.R --study <study_id> --light --cores 8 --incremental
+Rscript scripts/check_gene_tab_data.R --study <study_id>       # Gene-tab load check (works before main config registration)
+```
+
+`comps.tsv` (`comparison_file`: columns `group1`, `group2`, `name`, `joint`) must match each `deg_lists[].label` on `joint`; that mapping is not inferred automatically. Shared helpers live in `scripts/study_check_utils.R`. A local Cursor skill (`.cursor/skills/add-dataset/`, gitignored with the rest of `.cursor/`) can orchestrate the same steps when present.
+
 ### Gene tab: precomputed DE long file (`gdegs_file`)
 
 Optional per-study key in `data/<study_id>/config.yaml`: **`gdegs_file`** — path **relative to that study directory** (e.g. `degs/gdegs_long.tsv`). The app loads this file for p-value brackets on Gene-tab boxplots; if the key is missing or the file is absent, plots still work without brackets.
 
-Build or refresh the file **outside** the running app from the repository root, for example:
+Build or refresh the file **outside** the running app from the repository root:
+
+```bash
+Rscript scripts/build_gdegs_long.R --study your_study_id
+```
+
+Or via the helpers directly:
 
 ```r
 source("scripts/gdf_utils.R")
