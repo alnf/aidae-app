@@ -258,6 +258,24 @@ auth:
 
 Only relevant if you manage shinymanager credentials with that script. For local dev without `auth` in YAML, `data/creds.txt` remains a fallback (prefix `user` with `#` to disable a row).
 
+## Releases
+
+Release notes are generated from [Conventional Commits](https://www.conventionalcommits.org) with [git-cliff](https://git-cliff.org) (`cliff.toml`). Install the CLI locally ([installation](https://git-cliff.org/docs/installation/)); the `.deb` from GitHub Releases is the usual choice on Ubuntu.
+
+```bash
+# preview commits since the last tag (whole history if there is no tag yet)
+git cliff --unreleased
+
+# write CHANGELOG.md, commit it, tag, and publish
+git cliff --tag v0.1.0 -o CHANGELOG.md
+git add CHANGELOG.md && git commit -m "chore(release): v0.1.0"
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin main v0.1.0
+gh release create v0.1.0 --verify-tag --notes-file <(git cliff --latest --strip header)
+```
+
+Later releases are the same commands with the next `vX.Y.Z`. `git cliff --bumped-version` suggests the next SemVer from `feat` / `fix` / `feat!:` since the last tag. `chore(release)` and `chore(changelog)` commits are omitted from the notes.
+
 ### Custom modules
 
 Module: Mechanism-driven mitochondrial gene sets
