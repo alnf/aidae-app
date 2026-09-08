@@ -29,11 +29,11 @@ footer = """
     {% if release.version -%}
         {% if release.previous.version -%}
             [{{ release.version | trim_start_matches(pat="v") }}]: \
-                https://github.com/alnf/exprs-app-r\
+                https://github.com/alnf/aidae-app\
                     /compare/{{ release.previous.version }}...{{ release.version }}
         {% else -%}
             [{{ release.version | trim_start_matches(pat="v") }}]: \
-                https://github.com/alnf/exprs-app-r\
+                https://github.com/alnf/aidae-app\
                     /releases/tag/{{ release.version }}
         {% endif %}
     {% endif -%}
@@ -51,6 +51,9 @@ filter_commits = false
 tag_pattern = "v[0-9].*"
 topo_order = false
 sort_commits = "newest"
+commit_preprocessors = [
+    { pattern = "^Initial commit$", replace = "chore: initial commit" },
+]
 commit_parsers = [
     { message = "^feat", group = "<!-- 0 -->Features" },
     { message = "^fix", group = "<!-- 1 -->Bug Fixes" },
@@ -59,6 +62,7 @@ commit_parsers = [
     { message = "^refactor", group = "<!-- 4 -->Refactor" },
     { message = "^style", group = "<!-- 5 -->Styling" },
     { message = "^test", group = "<!-- 6 -->Testing" },
+    { message = "^chore: initial commit$", skip = true },
     { message = "^chore\\(release\\)", skip = true },
     { message = "^chore\\(changelog\\)", skip = true },
     { message = "^chore|^ci", group = "<!-- 7 -->Miscellaneous" },
