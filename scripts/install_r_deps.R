@@ -63,6 +63,9 @@ cran_pkgs <- c(
   # Custom ORA ontology upload (scripts/pathway_signatures.R)
   "readxl",
 
+  # Cap BLAS/OpenMP threads per ORA worker (scripts/ora_cache.R; no env vars)
+  "RhpcBLASctl",
+
   # shinymanager password hashing utility (scripts/hash_password.R)
   "scrypt",
 

@@ -13,14 +13,14 @@
 #     One DEG list from one study (path as in config, or comparison label). Merges into
 #     existing enrichment.rds when present (replaces rows for that comparison × pathway files run).
 #   Rscript scripts/precompute_ora.R [--cores N] ...
-#     Parallel ORA: --cores N = at most N R worker processes (overrides EXPRS_ORA_WORKERS).
-#     Each worker is forced to 1 BLAS/OpenMP thread so total CPU ≈ N (not N × BLAS threads).
-#     Use --cores 1 for fully sequential. At most one parallel layer runs at a time:
-#     - ≥2 pathway/ontology files: parallel across those files; DEG lists run sequentially per file.
-#     - Exactly 1 pathway file: parallel across DEG lists when there are ≥2 (like the Shiny ORA tab).
+#     Parallel ORA: --cores N forks exactly N worker processes (fixed pool, not one
+#     process per ontology). Omit --cores or use --cores 1 for sequential.
+#     Each worker is capped to 1 BLAS/OpenMP thread via RhpcBLASctl (no env vars).
+#     At most one parallel layer runs at a time:
+#     - ≥2 pathway/ontology files: parallel across those files; DEG lists sequential per file.
+#     - Exactly 1 pathway file: parallel across DEG lists when there are ≥2.
 #     - Full batch, one pathway file, every study has ≤1 DEG list: parallel across studies.
-#   --incremental / EXPRS_ORA_INCREMENTAL: merge-save RDS after each DEG list (resume on crash).
-#     With ontology-parallel: one RDS write per DEG list after all ontologies finish that list (no locking).
+#   --incremental: merge-save RDS after each DEG list (resume on crash). Off unless passed.
 
 args_all <- commandArgs(trailingOnly = TRUE)
 
@@ -161,19 +161,15 @@ print_usage <- function() {
     "    One DEG list only; merges into existing per-study RDS (v2) when present.\n",
     "  Rscript scripts/precompute_ora.R [--cores N] ...\n",
     "    Optional: parallel ORA (one layer: ontologies vs DEG lists vs studies — see file header).\n",
-    "    --cores N = at most N R workers; each uses 1 BLAS/OpenMP thread (≈ N CPUs total).\n",
-    "    --cores 1 is sequential. Overrides EXPRS_ORA_WORKERS for this run when N >= 1.\n",
+    "    --cores N = exactly N worker processes (prescheduled pool). --cores 1 is sequential.\n",
+    "    Omit --cores for sequential. No environment-variable fallback.\n",
     "  Rscript scripts/precompute_ora.R [--incremental | --no-incremental] ...\n",
     "    --incremental: merge-save RDS for crash-resume (per-DEG after all ontologies when parallel).\n",
+    "    Default is off unless --incremental is passed.\n",
     "  Rscript scripts/precompute_ora.R [--light | --heavy] ...\n",
     "    Optional ontology bucket from databases/pathways_list.yaml.\n",
     "    --light: run pathways_light or setdiff(pathways_list, pathways_heavy).\n",
-    "    --heavy: run pathways_heavy only.\n",
-    "    Default: use EXPRS_ORA_INCREMENTAL=1/true if neither flag is given.\n",
-    "Environment:\n",
-    "  EXPRS_APP_ROOT         If set, working directory is set to this path before sourcing.\n",
-    "  EXPRS_ORA_WORKERS      Default parallel worker count when --cores is omitted (see README).\n",
-    "  EXPRS_ORA_INCREMENTAL  If 1/true/yes and no --incremental/--no-incremental flag, enable incremental RDS.\n"
+    "    --heavy: run pathways_heavy only.\n"
   ))
 }
 
@@ -482,8 +478,7 @@ precompute_one_study_chunks <- function(
           message("[skip] ", sid, " — ", cmp, " has no usable DEG genes after filters")
           next
         }
-        ora_limit_numerical_threads(1L)
-        rnd <- parallel::mclapply(
+        rnd <- ora_mclapply(
           seq_len(n_pf),
           function(pi) {
             ora_limit_numerical_threads(1L)
@@ -555,8 +550,7 @@ precompute_one_study_chunks <- function(
             )
             list(kind = "merge", pf = pf, fr = fr, elapsed_sec = dt)
           },
-          mc.cores = path_w,
-          mc.preschedule = FALSE
+          cores = path_w
         )
         rd <- vapply(
           rnd,
@@ -605,8 +599,7 @@ precompute_one_study_chunks <- function(
       "[ORA precompute] ", sid, ": ontology-parallel (", path_w, " workers) over ",
       n_pf, " pathway file(s); DEG lists sequential within each ontology."
     )
-    ora_limit_numerical_threads(1L)
-    pl_raw <- parallel::mclapply(
+    pl_raw <- ora_mclapply(
       seq_len(n_pf),
       function(pi) {
         ora_limit_numerical_threads(1L)
@@ -618,8 +611,7 @@ precompute_one_study_chunks <- function(
           incremental = FALSE
         )
       },
-      mc.cores = path_w,
-      mc.preschedule = FALSE
+      cores = path_w
     )
     for (pi in seq_len(n_pf)) {
       r <- pl_raw[[pi]]
@@ -791,24 +783,16 @@ if (!is.null(deg_filter)) {
   )
 }
 
-precompute_workers <- if (is.na(parsed$cores)) NULL else as.integer(parsed$cores)
+precompute_workers <- if (is.na(parsed$cores)) 1L else as.integer(parsed$cores)
 if (!is.na(parsed$cores)) {
-  message("ORA workers: ", parsed$cores, " (--cores)")
+  message("ORA workers: ", parsed$cores, " (--cores; fixed pool, not one process per task)")
 } else {
-  ev <- Sys.getenv("EXPRS_ORA_WORKERS", unset = "")
-  if (nzchar(trimws(ev))) {
-    message("ORA workers: ", trimws(ev), " (EXPRS_ORA_WORKERS)")
-  }
+  message("ORA workers: 1 (sequential; pass --cores N for a fixed worker pool)")
 }
 
-precompute_incremental <- if (is.na(parsed$incremental)) {
-  v <- tolower(trimws(Sys.getenv("EXPRS_ORA_INCREMENTAL", unset = "")))
-  v %in% c("1", "true", "yes")
-} else {
-  isTRUE(parsed$incremental)
-}
+precompute_incremental <- isTRUE(parsed$incremental)
 if (isTRUE(precompute_incremental)) {
-  message("ORA incremental RDS: ON (--incremental or EXPRS_ORA_INCREMENTAL)")
+  message("ORA incremental RDS: ON (--incremental)")
 }
 
 #' One study: precompute chunks + save RDS (used sequential or inside `mclapply`).
@@ -885,8 +869,7 @@ run_batch <- function(study_ids, workers = NULL) {
       "[ORA precompute] study-parallel: ", sp$w, " workers × ", length(study_ids),
       " studies (one pathway file each, ≤1 DEG list per study)."
     )
-    ora_limit_numerical_threads(1L)
-    parallel::mclapply(
+    ora_mclapply(
       study_ids,
       function(sid) {
         ora_limit_numerical_threads(1L)
@@ -898,8 +881,7 @@ run_batch <- function(study_ids, workers = NULL) {
           }
         )
       },
-      mc.cores = sp$w,
-      mc.preschedule = FALSE
+      cores = sp$w
     )
     return(invisible(NULL))
   }

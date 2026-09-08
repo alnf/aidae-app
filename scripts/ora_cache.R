@@ -406,12 +406,10 @@ ora_filter_long_by_visibility <- function(long_by_sid, deg_by_study) {
   out
 }
 
-#' Cap BLAS / OpenMP / similar to `n` threads **per R process**.
+#' Cap BLAS / OpenMP to `n` threads **per R process** via package APIs (no env vars).
 #'
-#' `parallel::mclapply` with `--cores N` forks N workers; without this, each worker
-#' often spins its own BLAS/OpenMP pool (≈ N × detectCores() OS threads). Call in
-#' the parent before fork and at the start of every worker so `--cores N` means
-#' about N busy CPUs total.
+#' Call in the parent before fork and at the start of every worker. Requires
+#' **RhpcBLASctl** for a reliable BLAS cap; `Sys.setenv(OMP_*)` is not used.
 #'
 #' @param n Integer threads per process (default 1).
 #' @return `n` (invisible).
@@ -420,16 +418,6 @@ ora_limit_numerical_threads <- function(n = 1L) {
   if (length(n) != 1L || is.na(n) || n < 1L) {
     n <- 1L
   }
-  ns <- as.character(n)
-  Sys.setenv(
-    OMP_NUM_THREADS = ns,
-    OPENBLAS_NUM_THREADS = ns,
-    MKL_NUM_THREADS = ns,
-    VECLIB_MAXIMUM_THREADS = ns,
-    NUMEXPR_NUM_THREADS = ns,
-    BLIS_NUM_THREADS = ns,
-    GOTO_NUM_THREADS = ns
-  )
   if (requireNamespace("RhpcBLASctl", quietly = TRUE)) {
     try(RhpcBLASctl::blas_set_num_threads(n), silent = TRUE)
     try(RhpcBLASctl::omp_set_num_threads(n), silent = TRUE)
@@ -440,29 +428,50 @@ ora_limit_numerical_threads <- function(n = 1L) {
   invisible(n)
 }
 
-#' Resolve ORA parallel worker count (cap by cores and task count).
-#' @param workers `NULL` → `EXPRS_ORA_WORKERS` env, then `1`. Values `< 2` use sequential execution.
+#' Resolve ORA worker count from an explicit `--cores` / `workers` argument.
+#'
+#' `NULL` / `NA` / `< 2` → sequential (`1`). Never reads environment variables.
+#' Never exceeds `n_tasks` (cannot have more workers than jobs).
 ora_resolve_ora_workers <- function(workers, n_tasks) {
-  w <- workers
-  if (is.null(w)) {
-    ev <- Sys.getenv("EXPRS_ORA_WORKERS", unset = "")
-    w <- if (nzchar(trimws(ev))) suppressWarnings(as.integer(trimws(ev))) else 1L
-  } else {
-    w <- suppressWarnings(as.integer(w))
+  if (is.null(workers) || length(workers) < 1L) {
+    return(1L)
   }
+  w <- suppressWarnings(as.integer(workers[[1L]]))
   if (length(w) != 1L || is.na(w) || w < 2L) {
     return(1L)
   }
   if (length(n_tasks) != 1L || is.na(n_tasks) || n_tasks < 2L) {
     return(1L)
   }
-  dc <- parallel::detectCores()
-  if (is.na(dc)) {
-    dc <- 2L
+  min(w, as.integer(n_tasks))
+}
+
+#' `lapply` or a **fixed pool** of `cores` forked workers (never one process per task).
+#'
+#' Uses `mc.preschedule = TRUE` so `--cores N` forks exactly N children, each
+#' running a chunk of `X`. `mc.allow.recursive = FALSE` blocks nested `mclapply`.
+ora_mclapply <- function(X, FUN, ..., cores) {
+  n <- length(X)
+  w <- ora_resolve_ora_workers(cores, n)
+  if (w < 2L) {
+    return(lapply(X, FUN, ...))
   }
-  # Use all logical processors (user can set workers lower to leave headroom).
-  maxw <- max(1L, as.integer(dc))
-  min(w, maxw, as.integer(n_tasks))
+  if (!requireNamespace("RhpcBLASctl", quietly = TRUE)) {
+    message(
+      "[ORA] RhpcBLASctl is not installed; BLAS may still spawn extra threads ",
+      "inside each of the ", w, " workers. Install it (see scripts/install_r_deps.R)."
+    )
+  }
+  ora_limit_numerical_threads(1L)
+  parallel::mclapply(
+    X,
+    FUN,
+    ...,
+    mc.cores = w,
+    mc.preschedule = TRUE,
+    mc.cleanup = TRUE,
+    mc.allow.recursive = FALSE
+  )
 }
 
 #' Ordered tasks for ORA: one entry per DEG list row (study order × list order).
@@ -621,7 +630,7 @@ ora_enrichment_one_deg_entry <- function(
   do.call(rbind, long_rows)
 }
 
-#' Run `ora_enrichment_one_deg_entry` for each task; optional `parallel::mclapply` when `workers >= 2`.
+#' Run `ora_enrichment_one_deg_entry` for each task; optional fixed worker pool when `workers >= 2`.
 ora_execute_deg_tasks <- function(
     tasks,
     t2g_u,
@@ -657,8 +666,7 @@ ora_execute_deg_tasks <- function(
       )
     }
   } else {
-    ora_limit_numerical_threads(1L)
-    per <- parallel::mclapply(
+    per <- ora_mclapply(
       seq_len(n_tasks),
       function(i) {
         ora_limit_numerical_threads(1L)
@@ -668,8 +676,7 @@ ora_execute_deg_tasks <- function(
           t2g_u, min_gs_size, max_gs_size
         )
       },
-      mc.cores = w,
-      mc.preschedule = FALSE
+      cores = w
     )
     if (is.function(progress)) {
       try(

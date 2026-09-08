@@ -1,6 +1,6 @@
-# exprs-app-r
+# AIDAE
 
-Universal application for expression analysis.
+**A**n **I**nteractive **D**ata **A**nalysis **E**nvironment for Multi-Omics Studies
 
 ## Running the app
 
@@ -24,6 +24,8 @@ For the Gene tab:
 - if top-level `counts_file` exists and is valid, the app uses that single matrix for the study;
 - otherwise the app groups DEG lists by resolved count matrix and renders one plot panel per unique matrix (panel title is DEG `label` list joined with commas).
 
+
+
 ### Panels tab
 
 Category-annotated **expression** heatmaps (row z-scores) for genes defined in a shared **gene ontology** file. The same ontology is used on the **ORA** tab for custom enrichment.
@@ -35,6 +37,8 @@ Category-annotated **expression** heatmaps (row z-scores) for genes defined in a
 - **Columns:** samples for one region/facet level when metadata has `Region` or study `gene_tab_facet` (e.g. LV or RV, not all at once); otherwise all samples. Grouped by `PhenoNames` with clustering within each phenotype.
 - **From ORA:** with custom ontology loaded, dot-click in **Comparison (column intent)** mode shows **Open expression panel** to jump to Panels for that study.
 
+
+
 ### Config tab
 
 Session-wide visibility toggles for studies and individual DEG lists (checkbox tree: study → DEG lists).
@@ -43,6 +47,8 @@ Session-wide visibility toggles for studies and individual DEG lists (checkbox t
 - **Visible scope** is chosen on the **Config** tab and applies for the current browser session only (not saved to YAML).
 - Unchecked studies or DEG lists are hidden from **ORA**, **UpSet**, **Gene** (sections and gene search), and sidebar study / DEG list dropdowns (Info, DEGs, Panels, UpSet threshold targets).
 - Use **Select all**, **Deselect all**, or **Reset to defaults** to bulk-update checkboxes. Unchecking a study clears its DEG list checkboxes; checking a study selects all of its lists.
+
+
 
 ## Posit Connect deploy
 
@@ -53,14 +59,14 @@ cp deploy/apps/all.example.yaml deploy/apps/all.yaml
 # edit deploy/apps/all.yaml — set account, title, and app_id from the Connect UI (after first publish)
 ```
 
-Each file combines **runtime** keys (same idea as root `config.yaml`: `title`, `studies`, `pathways_list`, `auth`, …), optional `extends: config.yaml`, a **`deploy:`** block (`account`, `title`, and `app_id` for `rsconnect deploy`; `app_id` is optional when using **`--new`** below), and a **`bundle:`** block (omit `databases/`, `orig/`, swap redundant count TSV for sibling `.rds`/`.eds` when present, ORA validation mode).
+Each file combines **runtime** keys (same idea as root `config.yaml`: `title`, `studies`, `pathways_list`, `auth`, …), optional `extends: config.yaml`, a `deploy:` block (`account`, `title`, and `app_id` for `rsconnect deploy`; `app_id` is optional when using `--new` below), and a `bundle:` block (omit `databases/`, `orig/`, swap redundant count TSV for sibling `.rds`/`.eds` when present, ORA validation mode).
 
-- **Build manifest and deploy:** `./deploy/deploy.sh heart` or `./deploy/deploy.sh deploy/apps/heart.yaml`. Add `--dry-run` to print bundle paths and approximate size without writing `manifest.json`. Add **`--verbose`** or **`-v`** for per-study bundle messages and `rsconnect::writeManifest(verbose = TRUE)` (dependency capture is clearer but still slow). Add **`--debug`** for a full bundle path list and `set -x` during the upload step. For a **first-time** publish to Connect (no content GUID yet), run with **`--new`** (for example `./deploy/deploy.sh newstudy --new --debug`); rsconnect creates new content and prints its URL—copy the **`app_id`** into the YAML for later updates without `--new`.
-- **“All studies” wrapper:** [`rsconnect.sh`](rsconnect.sh) runs `./deploy/deploy.sh all` (expects a local **`deploy/apps/all.yaml`**, typically created from [`deploy/apps/all.example.yaml`](deploy/apps/all.example.yaml)).
-- **Runtime config on the server:** set environment variable **`EXPRS_MAIN_CONFIG`** to the path of the same YAML file **inside the deployed bundle** (for example `deploy/apps/heart.yaml`). The app falls back to `config.yaml` when unset.
-- **Thin bundles (`bundle.omit_databases: true`):** do not upload `databases/pathways/`. Use an **inline `pathways_list`** in the deploy YAML (or a repo-relative list file such as `databases/pathways_list.yaml`, which is still bundled) and **precompute** per-study ORA (`ora_file`, default `ora/enrichment.rds`) for every pathway in that list. The manifest step validates RDS coverage (`bundle.ora_validate`: `strict`, `warn`, or `skip`). **Custom ontology** (.xlsx) still runs live `enricher` and does not require pathway files on disk. If the deploy YAML uses **`extends:`**, the base file (e.g. `config.yaml`) is included in the bundle so the app can merge the same keys at runtime.
+- **Build manifest and deploy:** `./deploy/deploy.sh heart` or `./deploy/deploy.sh deploy/apps/heart.yaml`. Add `--dry-run` to print bundle paths and approximate size without writing `manifest.json`. Add `--verbose` or `-v` for per-study bundle messages and `rsconnect::writeManifest(verbose = TRUE)` (dependency capture is clearer but still slow). Add `--debug` for a full bundle path list and `set -x` during the upload step. For a **first-time** publish to Connect (no content GUID yet), run with `--new` (for example `./deploy/deploy.sh newstudy --new --debug`); rsconnect creates new content and prints its URL—copy the `app_id` into the YAML for later updates without `--new`.
+- **“All studies” wrapper:** [`rsconnect.sh`](rsconnect.sh) runs `./deploy/deploy.sh all` (expects a local `deploy/apps/all.yaml`, typically created from [`deploy/apps/all.example.yaml`](deploy/apps/all.example.yaml)).
+- **Runtime config on the server:** set environment variable `EXPRS_MAIN_CONFIG` to the path of the same YAML file **inside the deployed bundle** (for example `deploy/apps/heart.yaml`). The app falls back to `config.yaml` when unset.
+- **Thin bundles (`bundle.omit_databases: true`):** do not upload `databases/pathways/`. Use an **inline** `pathways_list` in the deploy YAML (or a repo-relative list file such as `databases/pathways_list.yaml`, which is still bundled) and **precompute** per-study ORA (`ora_file`, default `ora/enrichment.rds`) for every pathway in that list. The manifest step validates RDS coverage (`bundle.ora_validate`: `strict`, `warn`, or `skip`). **Custom ontology** (.xlsx) still runs live `enricher` and does not require pathway files on disk. If the deploy YAML uses `extends:`, the base file (e.g. `config.yaml`) is included in the bundle so the app can merge the same keys at runtime.
 - **Secrets:** store Connect API keys outside the repo (environment variables or `rsconnect` account configuration). If an API key was ever committed, rotate it on the server.
-- **Login users:** put per-app shinymanager users in an **`auth:`** list in each deploy YAML (hashed passwords from `Rscript scripts/hash_password.R`). The app reads `auth` from the merged main config (`EXPRS_MAIN_CONFIG` on Connect). Local runs without `auth` in config can still use `data/creds.txt` (lines whose `user` starts with `#` are ignored).
+- **Login users:** put per-app shinymanager users in an `auth:` list in each deploy YAML (hashed passwords from `Rscript scripts/hash_password.R`). The app reads `auth` from the merged main config (`EXPRS_MAIN_CONFIG` on Connect). Local runs without `auth` in config can still use `data/creds.txt` (lines whose `user` starts with `#` are ignored).
 
 You need the **rsconnect** R package for `deploy/write_manifest.R`. The first run may take several minutes while dependencies are captured. From the repo root, `EXPRS_DEPLOY_REPO` defaults to the current working directory.
 
@@ -81,15 +87,17 @@ On a fresh Linux system, install the system libraries listed in the header comme
 
 These are loaded from `app.R` and are needed for heatmaps, tables, layout, and authentication:
 
-| Package | Role |
-|--------|------|
-| **shiny** | App framework |
-| **bs4Dash** | UI layout |
-| **shinymanager** | Login / auth |
+
+| Package                                                         | Role                                                                                   |
+| --------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| **shiny**                                                       | App framework                                                                          |
+| **bs4Dash**                                                     | UI layout                                                                              |
+| **shinymanager**                                                | Login / auth                                                                           |
 | **InteractiveComplexHeatmap**, **ComplexHeatmap**, **circlize** | Interactive heatmaps and **UpSet** tab (`UpSet()`, `make_comb_mat()`, row annotations) |
-| **yaml** | Reading `config.yaml` and study configs |
-| **DT** | Result tables |
-| **GetoptLong** | Used in the app (brush / utilities) |
+| **yaml**                                                        | Reading `config.yaml` and study configs                                                |
+| **DT**                                                          | Result tables                                                                          |
+| **GetoptLong**                                                  | Used in the app (brush / utilities)                                                    |
+
 
 Install missing packages from CRAN, for example:
 
@@ -127,6 +135,7 @@ install.packages(c("ggplot2", "ggpubr", "ggnewscale"))
 The **ORA** tab uses **clusterProfiler** (`enricher`) on a chosen pathway database file under `databases/pathways/` (all pathways in that file). For each study, enrichment runs **for every DEG list** in that study’s `config.yaml`, using **thresholds from the config** (study-level `thresholds` and optional per-list `deg_lists[].thresholds`), merged with the same defaults as the heatmap (`deg_list_threshold_defaults()`). A faceted ORA dot plot shows **comparisons (DEG list labels) on the x-axis**, **pathways on the y-axis**, **Gene ratio** as a blue-red colour scale, and **overlap count** as point size (p-values are not mapped to aesthetics; they are used internally to rank pathways).
 
 The ORA dot plot is interactive with **ggiraph**:
+
 - click a dot and interpret it as **Pathway (row intent)** to build a heatplot of pathway genes x all study comparisons (cell = `log2FC`);
 - click a dot and interpret it as **Comparison (column intent)** to build a classical heatplot of pathways x genes for the selected comparison (cell = `log2FC`).
 
@@ -134,16 +143,16 @@ The ORA dot plot is interactive with **ggiraph**:
 
 Sidebar filters for ORA include minimum overlap count, minimum pathway size, minimum gene ratio, and **maximum adjusted p-value (FDR)**. Default FDR cutoff is `1` (no FDR filtering), so behavior stays as before unless you choose a stricter threshold. Top-`N` pathway display still follows existing ranking by enrichment significance (`p_adj` / p-value order).
 
-**Parallel ORA (optional):** work is split with `parallel::mclapply` (forking on Unix/macOS; Windows stays effectively sequential). Set **`EXPRS_ORA_WORKERS`** to an integer ≥ `2`, or use **`scripts/precompute_ora.R --cores N`**. **`--cores N` means at most N R worker processes**; each worker is forced to **1 BLAS/OpenMP thread** (`ora_limit_numerical_threads(1)`), so total CPU use should stay near N — not N × (BLAS threads per process). The worker count is also capped by `parallel::detectCores()` and by the number of parallel tasks at the active layer.
+**Parallel ORA (optional):** `scripts/precompute_ora.R --cores N` forks a **fixed pool of N worker processes** (`mc.preschedule = TRUE`). `--cores 8` means 8 workers, not one process per ontology. Omit `--cores` or use `--cores 1` for sequential. There is no `EXPRS_ORA_*` fallback for worker count. Each worker is capped to 1 BLAS/OpenMP thread via **RhpcBLASctl** (package API, not environment variables). Nested `mclapply` is disabled (`mc.allow.recursive = FALSE`). Windows stays sequential.
 
 **Layers (only one layer runs in parallel at a time):**
 
 - **Shiny ORA tab / custom ontology:** one pathway database (or one custom ontology) per run. If a study has several DEG lists, jobs are **parallel across studies × DEG lists** for that ontology. With **one DEG list per study**, there is only one job per study, so you still only get parallelism when **multiple studies** each contribute a task.
 - **`scripts/precompute_ora.R`:** (1) If this run includes **several pathway / ontology files**, precompute uses **ontology-parallel** (`mclapply` over files); **DEG lists run sequentially** inside each ontology (avoids nested parallel). (2) If there is **exactly one** pathway file for the study, precompute can use **DEG-list parallel** when there are **≥2 DEG lists** (same idea as the Shiny ORA tab for one database). (3) On a **full multi-study batch** with **exactly one pathway file** in the run and **at most one DEG list per study**, it can run **studies in parallel**. Nested `mclapply` is deliberately avoided.
-- **Incremental RDS (`--incremental` or `EXPRS_ORA_INCREMENTAL=1`):** the script updates the per-study `enrichment.rds` so a crash leaves partial work. **Single ontology:** merge-save **after each DEG list** (sequential ontologies). **Several ontologies + parallel:** for each DEG list, `enricher` runs **in parallel across all ontologies**, then the parent performs **one** read–merge–write for that comparison across all ontologies (no file locking). Re-run the same command to **resume** (`[resume-skip]`). Resume uses a `completed` index on the RDS (`comparison` × `pathway_file` × status `ok`|`empty`) so empty enrichments are not re-parsed/re-run; legacy RDS without `completed` still resume from rows in `long_df`. Enrichr `GENE,score` weights are stripped when parsing pathway files (plain gene symbols unchanged). For a full refresh, remove the RDS or use **`--no-incremental`**.
-- **Heavy / light ontology buckets (`databases/pathways_list.yaml`):** optional keys `pathways_heavy` and `pathways_list` define the master list; **`--light`** runs `setdiff(pathways_list, pathways_heavy)` (or explicit `pathways_light` if set), **`--heavy`** runs `pathways_heavy` only. Logs include **`[ontology-done]`** / **`[deg-round]`** timings for profiling.
+- **Incremental RDS (`--incremental`):** the script updates the per-study `enrichment.rds` so a crash leaves partial work. Off unless the flag is passed. **Single ontology:** merge-save **after each DEG list** (sequential ontologies). **Several ontologies + parallel:** for each DEG list, `enricher` runs **in the N-worker pool across all ontologies**, then the parent performs **one** read–merge–write for that comparison (no file locking). Re-run the same command to **resume** (`[resume-skip]`). Resume uses a `completed` index on the RDS (`comparison` × `pathway_file` × status `ok`|`empty`) so empty enrichments are not re-parsed/re-run; legacy RDS without `completed` still resume from rows in `long_df`. Enrichr `GENE,score` weights are stripped when parsing pathway files (plain gene symbols unchanged). For a full refresh, remove the RDS or use `--no-incremental`.
+- **Heavy / light ontology buckets (`databases/pathways_list.yaml`):** optional keys `pathways_heavy` and `pathways_list` define the master list; `--light` runs `setdiff(pathways_list, pathways_heavy)` (or explicit `pathways_light` if set), `--heavy` runs `pathways_heavy` only. Logs include `[ontology-done]` / `[deg-round]` timings for profiling.
 
-Per-step Shiny progress updates run only in single-core mode; with parallel ORA the progress bar advances once when the parallel phase finishes. **`--cores 1`** forces sequential precompute and overrides `EXPRS_ORA_WORKERS` for that run. Precompute and parallel Shiny ORA paths set **`OMP_NUM_THREADS` / OpenBLAS / MKL (etc.) to 1** automatically; if you still see runaway threads, install **RhpcBLASctl** for stronger BLAS control, or lower `--cores` (large ontologies also use a lot of **RAM** per worker even when CPU is capped).
+Per-step Shiny progress updates run only in single-core mode; with parallel ORA the progress bar advances once when the parallel phase finishes. `--cores 1` is sequential. Large ontologies still use substantial **RAM per worker** (8 workers = 8 in-memory TERM2GENE tables), which is separate from the old one-process-per-ontology leak.
 
 **ORA tab load cache (Shiny session):** the app keeps an **in-memory cache** for the Shiny session (deserialized RDS per file path + filtered slices per ontology). Switching back to an ontology you already opened avoids repeated disk I/O. Restart the app or update `enrichment.rds` / shard files on disk to clear the cache.
 
@@ -157,7 +166,7 @@ Rscript scripts/split_ora_enrichment.R --dry-run    # plan only
 
 This copies `enrichment.rds` to `enrichment.rds.bak` and writes shard files; it **never deletes** the monolith.
 
-Use **`EXPRS_ORA_DEBUG=1`** for verbose `[ORA debug]` pathway messages (off by default). Optional timing: **`EXPRS_ORA_PROFILE=1`** or `Rscript scripts/profile_ora_pipeline.R`.
+Use `EXPRS_ORA_DEBUG=1` for verbose `[ORA debug]` pathway messages (off by default). Optional timing: `EXPRS_ORA_PROFILE=1` or `Rscript scripts/profile_ora_pipeline.R`.
 
 Install from Bioconductor, for example:
 
@@ -171,6 +180,8 @@ BiocManager::install("clusterProfiler")
 ```r
 install.packages(c("ggplot2", "ggiraph"))
 ```
+
+
 
 ### UpSet tab (DEG list intersections)
 
@@ -190,7 +201,7 @@ The app still uses **ComplexHeatmap** elsewhere; the UpSet tab no longer depends
 install.packages("readxl")
 ```
 
-Optional key **`pathways_list`** can be set in root `config.yaml` and/or per-study `data/<study_id>/config.yaml`.
+Optional key `pathways_list` can be set in root `config.yaml` and/or per-study `data/<study_id>/config.yaml`.
 
 - In root `config.yaml`, `pathways_list` can be either:
   - a vector of pathway filenames (e.g. `KEGG_2019_Mouse.txt`), or
@@ -211,6 +222,8 @@ This writes `databases/pathways_list.yaml` with a `pathways_list:` key. You can 
 pathways_list: databases/pathways_list.yaml
 ```
 
+
+
 ### Adding a study
 
 From the repository root, use these scripts to validate and build study artifacts (agent-friendly; exit non-zero on hard failures):
@@ -228,7 +241,7 @@ Rscript scripts/check_gene_tab_data.R --study <study_id>       # Gene-tab load c
 
 ### Gene tab: precomputed DE long file (`gdegs_file`)
 
-Optional per-study key in `data/<study_id>/config.yaml`: **`gdegs_file`** — path **relative to that study directory** (e.g. `degs/gdegs_long.tsv`). The app loads this file for p-value brackets on Gene-tab boxplots; if the key is missing or the file is absent, plots still work without brackets.
+Optional per-study key in `data/<study_id>/config.yaml`: `gdegs_file` — path **relative to that study directory** (e.g. `degs/gdegs_long.tsv`). The app loads this file for p-value brackets on Gene-tab boxplots; if the key is missing or the file is absent, plots still work without brackets.
 
 Build or refresh the file **outside** the running app from the repository root:
 
@@ -244,11 +257,11 @@ df <- build_gene_deg_long("your_study_id")
 write_gene_deg_long(df, "your_study_id")
 ```
 
-`write_gene_deg_long()` writes to `data/<study_id>/<gdegs_file>` from config. Optional **`gene_tab_facet`** in the same config controls metadata column used for faceting (see `scripts/gdf_utils.R`).
+`write_gene_deg_long()` writes to `data/<study_id>/<gdegs_file>` from config. Optional `gene_tab_facet` in the same config controls metadata column used for faceting (see `scripts/gdf_utils.R`).
 
 ### Password hashing utility
 
-`scripts/hash_password.R` prints a scrypt hash for the `password` field under **`auth:`** in `config.yaml` or `deploy/apps/*.yaml`. Example:
+`scripts/hash_password.R` prints a scrypt hash for the `password` field under `auth:` in `config.yaml` or `deploy/apps/*.yaml`. Example:
 
 ```yaml
 auth:
@@ -271,7 +284,9 @@ git cliff --tag v0.1.0 -o CHANGELOG.md
 git add CHANGELOG.md && git commit -m "chore(release): v0.1.0"
 git tag -a v0.1.0 -m "v0.1.0"
 git push origin main v0.1.0
-gh release create v0.1.0 --verify-tag --notes-file <(git cliff --latest --strip header)
+gh release create v0.1.0 --title "v0.1.0" --verify-tag --notes-file <(git cliff --latest --strip header)
+# if a release was published without a title:
+# gh release edit v0.1.0 --title "v0.1.0"
 ```
 
 Later releases are the same commands with the next `vX.Y.Z`. `git cliff --bumped-version` suggests the next SemVer from `feat` / `fix` / `feat!:` since the last tag. `chore(release)` and `chore(changelog)` commits are omitted from the notes.
@@ -285,6 +300,8 @@ Genes involved in the formation and maintenance of mitochondrial cristae structu
 including MICOS complex components and ATP synthase–mediated membrane curvature.
 
 Sources:
+
 - Pfanner et al., Nat Rev Mol Cell Biol (2014)
 - Rampelt et al., J Cell Biol (2017)
 - MitoCarta3.0 (for gene localization)
+
